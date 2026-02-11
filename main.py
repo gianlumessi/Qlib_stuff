@@ -23,6 +23,7 @@ from asset_swap import (
     replicate_par_par_asset_swap,
     compute_z_spread,
 )
+from plots import plot_rate_curves, plot_spreads_vs_price, plot_bond_cashflows
 
 
 def separator(title: str) -> None:
@@ -122,6 +123,7 @@ def main() -> None:
         evaluation_date=eval_date,
     )
 
+    print(f"Upfront (t=0)   : {asw.upfront:>10.4f}  (investor {'receives' if asw.upfront >= 0 else 'pays'} {abs(asw.upfront):.4f})")
     print(f"ASW spread      : {asw.asset_swap_spread:>10.2f} bps")
     print(f"Fair spread     : {asw.fair_spread * 100:>10.4f}%")
     print(f"Swap NPV        : {asw.npv:>10.4f}")
@@ -164,7 +166,11 @@ def main() -> None:
         print(f"  {s:<15} {e:<15} {fp.year_fraction:>8.4f} {fp.discount_factor:>12.8f} {fp.contribution:>10.6f}")
     print(f"  {'':>15} {'':>15} {'':>8} {'Annuity':>12} {rep.floating_annuity:>10.6f}")
 
-    print(f"\nStep 3 — Solve for spread:")
+    print(f"\nStep 3 — Upfront payment (swap value at t=0):")
+    print(f"  Upfront = 100 - Dirty = 100 - {rep.market_dirty_price:.4f} = {rep.upfront:.4f}")
+    print(f"  (Investor {'receives' if rep.upfront >= 0 else 'pays'} {abs(rep.upfront):.4f} at inception)")
+
+    print(f"\nStep 4 — Solve for spread:")
     print(f"  s = (PV_bond - dirty) / (face * annuity)")
     print(f"    = ({rep.bond_pv_at_swap_curve:.4f} - {rep.market_dirty_price:.4f})"
           f" / (100 * {rep.floating_annuity:.6f})")
@@ -198,6 +204,23 @@ def main() -> None:
         r = replicate_par_par_asset_swap(bond, px, curve_handle, evaluation_date=eval_date)
         z = compute_z_spread(bond, clean_for_z, curve_handle)
         print(f"{px:>12.4f} {a.asset_swap_spread:>12.2f} {r.asset_swap_spread:>14.2f} {z:>12.2f}")
+
+    # ------------------------------------------------------------------
+    # 8. Generate plots
+    # ------------------------------------------------------------------
+    separator("Generating Plots")
+
+    p1 = plot_rate_curves(curve_handle, eval_date)
+    print(f"  [1] Interest-rate curves  -> {p1}")
+
+    p2 = plot_spreads_vs_price(
+        bond, market_dirty_price, results.accrued_interest,
+        curve_handle, eval_date,
+    )
+    print(f"  [2] Spread vs price       -> {p2}")
+
+    p3 = plot_bond_cashflows(bond, curve_handle, eval_date)
+    print(f"  [3] Bond cashflow profile -> {p3}")
 
     print("\nDone.")
 
