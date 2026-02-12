@@ -37,6 +37,7 @@ class AssetSwapResults:
     fair_spread: float         # decimal
     bond_clean_price: float
     bond_dirty_price: float
+    upfront: float             # par-par upfront = 100 - dirty_price
     npv: float
     fixed_leg_npv: float
     floating_leg_npv: float
@@ -71,6 +72,7 @@ class ReplicatedAssetSwapResults:
     fair_spread: float                # decimal
     bond_pv_at_swap_curve: float      # theoretical dirty price at swap curve
     market_dirty_price: float
+    upfront: float                    # par-par upfront = 100 - dirty_price
     floating_annuity: float           # per-unit-notional annuity factor
     bond_cashflows: list = field(default_factory=list)
     floating_periods: list = field(default_factory=list)
@@ -139,11 +141,16 @@ def price_par_par_asset_swap(
     fixed_leg_npv = asset_swap.legNPV(0)
     floating_leg_npv = asset_swap.legNPV(1)
 
+    # Par-par upfront: the investor pays dirty for the bond and receives
+    # 100 from the dealer.  Positive upfront = investor receives cash.
+    upfront = 100.0 - bond_dirty_price
+
     return AssetSwapResults(
         asset_swap_spread=fair_spread * 10_000,
         fair_spread=fair_spread,
         bond_clean_price=bond_clean_price,
         bond_dirty_price=bond_dirty_price,
+        upfront=upfront,
         npv=npv,
         fixed_leg_npv=fixed_leg_npv,
         floating_leg_npv=floating_leg_npv,
@@ -278,11 +285,14 @@ def replicate_par_par_asset_swap(
     #   s = (PV_bond_at_settle - dirty_price) / (face * annuity)
     spread = (bond_pv_settle - bond_dirty_price) / (face * annuity)
 
+    upfront = 100.0 - bond_dirty_price
+
     return ReplicatedAssetSwapResults(
         asset_swap_spread=spread * 10_000,
         fair_spread=spread,
         bond_pv_at_swap_curve=bond_pv_settle,
         market_dirty_price=bond_dirty_price,
+        upfront=upfront,
         floating_annuity=annuity,
         bond_cashflows=cf_details,
         floating_periods=fp_details,
