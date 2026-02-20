@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-Educational example: pricing a fixed-rate bond and its par-par asset swap.
+Educational example: pricing fixed-income instruments with QuantLib.
 
-This script demonstrates:
-  1. Building a EUR discount curve from deposit + swap rates.
-  2. Pricing a fixed-rate government/corporate bond off that curve.
-  3. Computing the par-par asset-swap spread (ASW) two ways:
-       a) QuantLib's ``AssetSwap`` class.
-       b) Manual replication from first-principles (bond cashflows +
-          floating-leg annuity).
-  4. Comparing both approaches to verify they match.
+Instruments covered:
+  1. Fixed-rate bond
+  2. Par-par asset swap (QuantLib built-in + manual replication)
+  3. Interest rate swap (IRS)
+  4. Fixed-fixed cross-currency swap
+  5. Fixed-floating cross-currency swap
+  6. Floating-floating cross-currency basis swap
 
 All numbers are illustrative — not live market data.
 """
 
 import QuantLib as ql
 
-from curves import build_sample_eur_curve
+from curves import build_sample_eur_curve, build_sample_usd_curve
 from bond_pricer import build_fixed_rate_bond, price_bond, price_bond_from_yield
 from asset_swap import (
     price_par_par_asset_swap,
     replicate_par_par_asset_swap,
     compute_z_spread,
+)
+from swap_pricer import price_irs
+from xccy_swap_pricer import (
+    price_fixed_fixed_xccy_swap,
+    price_fixed_floating_xccy_swap,
+    price_float_float_xccy_swap,
 )
 from plots import plot_rate_curves, plot_spreads_vs_price, plot_bond_cashflows
 
@@ -205,8 +210,166 @@ def main() -> None:
         z = compute_z_spread(bond, clean_for_z, curve_handle)
         print(f"{px:>12.4f} {a.asset_swap_spread:>12.2f} {r.asset_swap_spread:>14.2f} {z:>12.2f}")
 
+    # ==================================================================
+    #  INTEREST RATE SWAP
+    # ==================================================================
+    separator("Interest Rate Swap (EUR, 10Y Payer)")
+
+    # Price a 10-year EUR payer swap (pay 3.00 % fixed, receive Euribor 6M)
+    irs = price_irs(
+        notional=10_000_000,
+        fixed_rate=0.0300,        # 3.00 % — the par rate for 10Y is also ~3 %
+        tenor_years=10,
+        discount_curve=curve_handle,
+        evaluation_date=eval_date,
+    )
+
+    print(f"Swap type       : {irs.swap_type}")
+    print(f"Notional        : {irs.notional:>14,.0f} EUR")
+    print(f"Fixed rate      : {irs.fixed_rate * 100:>14.4f}%")
+    print(f"Maturity        : {irs.maturity_years}Y")
+    print(f"NPV             : {irs.npv:>14,.2f} EUR")
+    print(f"Fair rate       : {irs.fair_rate * 100:>14.4f}%")
+    print(f"Fair spread     : {irs.fair_spread * 10000:>14.2f} bps")
+    print(f"Fixed leg NPV   : {irs.fixed_leg_npv:>14,.2f}")
+    print(f"Float leg NPV   : {irs.floating_leg_npv:>14,.2f}")
+    print(f"Fixed leg BPS   : {irs.fixed_leg_bps:>14,.2f}")
+    print(f"Float leg BPS   : {irs.floating_leg_bps:>14,.2f}")
+
+    # Show a range of fixed rates around the fair rate
+    print(f"\n  {'Fixed Rate':>12} {'NPV (EUR)':>16}")
+    print(f"  {'-'*30}")
+    for bump_bps in [-50, -25, -10, 0, 10, 25, 50]:
+        r = irs.fair_rate + bump_bps / 10000
+        irs_bump = price_irs(
+            10_000_000, r, 10, curve_handle, evaluation_date=eval_date,
+        )
+        print(f"  {r*100:>11.4f}% {irs_bump.npv:>16,.2f}")
+
+    # ==================================================================
+    #  BUILD USD CURVE (needed for cross-currency swaps)
+    # ==================================================================
+    separator("USD Discount Curve")
+    usd_curve = build_sample_usd_curve(eval_date)
+
+    pillars_usd = [
+        ql.Period(6, ql.Months),
+        ql.Period(2, ql.Years),
+        ql.Period(5, ql.Years),
+        ql.Period(10, ql.Years),
+        ql.Period(30, ql.Years),
+    ]
+    cal_usd = ql.UnitedStates(ql.UnitedStates.FederalReserve)
+    print(f"{'Tenor':<10} {'DF':>16} {'Zero Rate':>12}")
+    print("-" * 40)
+    for p in pillars_usd:
+        d = cal_usd.advance(eval_date, p)
+        df = usd_curve.discount(d)
+        zr = usd_curve.zeroRate(d, ql.Actual365Fixed(), ql.Continuous).rate()
+        print(f"{str(p):<10} {df:>16.8f} {zr * 100:>11.4f}%")
+
+    # ==================================================================
+    #  CROSS-CURRENCY SWAP PARAMETERS
+    # ==================================================================
+    # Spot FX: EUR/USD = 1.10 (1 EUR = 1.10 USD)
+    # We express spot_fx as "domestic (EUR) per 1 foreign (USD)":
+    #   spot_fx = 1 / 1.10 ≈ 0.9091 EUR per 1 USD
+    # But it is more natural to think in EUR/USD = 1.10 and set notionals:
+    #   EUR notional = 10,000,000
+    #   USD notional = 10,000,000 * 1.10 = 11,000,000
+    #   spot_fx (EUR per 1 USD) = 1 / 1.10
+    eur_usd_spot = 1.10             # 1 EUR = 1.10 USD
+    spot_fx_eur_per_usd = 1.0 / eur_usd_spot   # EUR per 1 USD
+    eur_notional = 10_000_000
+    usd_notional = eur_notional * eur_usd_spot  # 11,000,000 USD
+
+    # ==================================================================
+    #  FIXED-FIXED CROSS-CURRENCY SWAP
+    # ==================================================================
+    separator("Fixed-Fixed Cross-Currency Swap (EUR/USD, 5Y)")
+
+    ff_xccy = price_fixed_fixed_xccy_swap(
+        domestic_notional=eur_notional,
+        foreign_notional=usd_notional,
+        domestic_fixed_rate=0.0285,   # 2.85 % EUR fixed
+        foreign_fixed_rate=0.0355,    # 3.55 % USD fixed
+        tenor_years=5,
+        domestic_curve=curve_handle,
+        foreign_curve=usd_curve,
+        spot_fx=spot_fx_eur_per_usd,
+        evaluation_date=eval_date,
+    )
+
+    print(f"Swap type            : {ff_xccy.swap_type}")
+    print(f"EUR notional         : {ff_xccy.domestic_notional:>16,.0f}")
+    print(f"USD notional         : {ff_xccy.foreign_notional:>16,.0f}")
+    print(f"Spot FX (EUR/USD)    : {eur_usd_spot:.4f}")
+    print(f"EUR fixed rate       : 2.85%")
+    print(f"USD fixed rate       : 3.55%")
+    print(f"EUR leg PV           : {ff_xccy.domestic_leg_pv:>16,.2f} EUR")
+    print(f"USD leg PV           : {ff_xccy.foreign_leg_pv:>16,.2f} USD")
+    print(f"USD leg PV (in EUR)  : {ff_xccy.foreign_leg_pv_in_domestic:>16,.2f} EUR")
+    print(f"NPV (EUR)            : {ff_xccy.npv_domestic:>16,.2f} EUR")
+    print(f"{ff_xccy.fair_value_description:<21}: {ff_xccy.fair_value * 100:>14.4f}%")
+
+    # ==================================================================
+    #  FIXED-FLOATING CROSS-CURRENCY SWAP
+    # ==================================================================
+    separator("Fixed-Floating Cross-Currency Swap (EUR/USD, 5Y)")
+
+    # Pay EUR 2.85 % fixed, receive USD LIBOR 3M + 10 bps
+    ffl_xccy = price_fixed_floating_xccy_swap(
+        domestic_notional=eur_notional,
+        foreign_notional=usd_notional,
+        domestic_fixed_rate=0.0285,
+        foreign_float_spread=0.0010,   # +10 bps over USD LIBOR
+        tenor_years=5,
+        domestic_curve=curve_handle,
+        foreign_curve=usd_curve,
+        spot_fx=spot_fx_eur_per_usd,
+        evaluation_date=eval_date,
+    )
+
+    print(f"Swap type            : {ffl_xccy.swap_type}")
+    print(f"EUR fixed rate       : 2.85%")
+    print(f"USD float spread     : +10 bps over LIBOR 3M")
+    print(f"EUR leg PV           : {ffl_xccy.domestic_leg_pv:>16,.2f} EUR")
+    print(f"USD leg PV           : {ffl_xccy.foreign_leg_pv:>16,.2f} USD")
+    print(f"USD leg PV (in EUR)  : {ffl_xccy.foreign_leg_pv_in_domestic:>16,.2f} EUR")
+    print(f"NPV (EUR)            : {ffl_xccy.npv_domestic:>16,.2f} EUR")
+    print(f"{ffl_xccy.fair_value_description:<21}: {ffl_xccy.fair_value * 100:>14.4f}%")
+
+    # ==================================================================
+    #  FLOATING-FLOATING CROSS-CURRENCY BASIS SWAP
+    # ==================================================================
+    separator("Float-Float XCCY Basis Swap (EUR/USD, 5Y)")
+
+    # Pay EUR Euribor 6M + basis, receive USD LIBOR 3M flat
+    # The basis is the "price" of EUR vs USD funding.
+    basis_bps = -15  # -15 bps is a typical EUR/USD basis
+    ffloat_xccy = price_float_float_xccy_swap(
+        domestic_notional=eur_notional,
+        foreign_notional=usd_notional,
+        domestic_float_spread=basis_bps / 10000,  # -15 bps on EUR leg
+        foreign_float_spread=0.0,                  # flat on USD leg
+        tenor_years=5,
+        domestic_curve=curve_handle,
+        foreign_curve=usd_curve,
+        spot_fx=spot_fx_eur_per_usd,
+        evaluation_date=eval_date,
+    )
+
+    print(f"Swap type            : {ffloat_xccy.swap_type}")
+    print(f"EUR float spread     : {basis_bps:+d} bps over Euribor 6M")
+    print(f"USD float spread     : flat (LIBOR 3M)")
+    print(f"EUR leg PV           : {ffloat_xccy.domestic_leg_pv:>16,.2f} EUR")
+    print(f"USD leg PV           : {ffloat_xccy.foreign_leg_pv:>16,.2f} USD")
+    print(f"USD leg PV (in EUR)  : {ffloat_xccy.foreign_leg_pv_in_domestic:>16,.2f} EUR")
+    print(f"NPV (EUR)            : {ffloat_xccy.npv_domestic:>16,.2f} EUR")
+    print(f"{ffloat_xccy.fair_value_description:<21}: {ffloat_xccy.fair_value * 10000:>14.2f} bps")
+
     # ------------------------------------------------------------------
-    # 8. Generate plots
+    # Generate plots
     # ------------------------------------------------------------------
     separator("Generating Plots")
 

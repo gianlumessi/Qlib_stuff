@@ -3,6 +3,10 @@ Yield curve bootstrapping utilities using QuantLib.
 
 Provides helpers for building discount curves from deposit rates, futures,
 and swap rates — the standard inputs for a money-market / swap curve.
+
+Two sample curves are included for educational examples:
+  - EUR curve  (Euribor deposits + EUR IRS)
+  - USD curve  (USD LIBOR deposits + USD IRS)
 """
 
 import QuantLib as ql
@@ -158,5 +162,85 @@ def build_sample_eur_curve(evaluation_date: ql.Date) -> ql.YieldTermStructureHan
         make_swap_helper(0.0310, ql.Period(15, ql.Years)),
         make_swap_helper(0.0315, ql.Period(20, ql.Years)),
         make_swap_helper(0.0310, ql.Period(30, ql.Years)),
+    ]
+    return build_discount_curve(evaluation_date, deposits, swaps)
+
+
+# ---------------------------------------------------------------------------
+# USD helpers and sample curve
+# ---------------------------------------------------------------------------
+
+def make_usd_deposit_helper(
+    rate: float,
+    tenor: ql.Period,
+    calendar: ql.Calendar = ql.UnitedStates(ql.UnitedStates.FederalReserve),
+    day_count: ql.DayCounter = ql.Actual360(),
+    convention: int = ql.ModifiedFollowing,
+) -> ql.DepositRateHelper:
+    """Create a USD deposit rate helper (same mechanics as EUR, different calendar)."""
+    return ql.DepositRateHelper(
+        ql.QuoteHandle(ql.SimpleQuote(rate)),
+        tenor,
+        2,  # T+2 settlement
+        calendar,
+        convention,
+        False,
+        day_count,
+    )
+
+
+def make_usd_swap_helper(
+    rate: float,
+    tenor: ql.Period,
+    calendar: ql.Calendar = ql.UnitedStates(ql.UnitedStates.FederalReserve),
+    fixed_frequency: int = ql.Semiannual,
+    fixed_day_count: ql.DayCounter = ql.Thirty360(ql.Thirty360.BondBasis),
+    float_index: Optional[ql.IborIndex] = None,
+) -> ql.SwapRateHelper:
+    """Create a USD swap rate helper.
+
+    USD IRS conventions differ from EUR:
+      - Fixed leg pays semiannually (not annually).
+      - Floating index is typically USD LIBOR 3M.
+    """
+    if float_index is None:
+        float_index = ql.USDLibor(ql.Period(3, ql.Months))
+
+    return ql.SwapRateHelper(
+        ql.QuoteHandle(ql.SimpleQuote(rate)),
+        tenor,
+        calendar,
+        fixed_frequency,
+        ql.ModifiedFollowing,
+        fixed_day_count,
+        float_index,
+    )
+
+
+def build_sample_usd_curve(evaluation_date: ql.Date) -> ql.YieldTermStructureHandle:
+    """Build a representative USD discount curve for demo purposes.
+
+    Uses illustrative deposit and swap rates that produce a curve roughly
+    50-70 bp above the EUR curve — a stylised representation of the
+    EUR/USD rate differential.
+    """
+    # --- Short end: USD LIBOR deposits ---
+    deposits = [
+        make_usd_deposit_helper(0.0450, ql.Period(1, ql.Months)),
+        make_usd_deposit_helper(0.0440, ql.Period(3, ql.Months)),
+        make_usd_deposit_helper(0.0430, ql.Period(6, ql.Months)),
+    ]
+
+    # --- Long end: USD IRS (semi-annual fixed vs 3M LIBOR) ---
+    swaps = [
+        make_usd_swap_helper(0.0400, ql.Period(1, ql.Years)),
+        make_usd_swap_helper(0.0380, ql.Period(2, ql.Years)),
+        make_usd_swap_helper(0.0365, ql.Period(3, ql.Years)),
+        make_usd_swap_helper(0.0355, ql.Period(5, ql.Years)),
+        make_usd_swap_helper(0.0360, ql.Period(7, ql.Years)),
+        make_usd_swap_helper(0.0370, ql.Period(10, ql.Years)),
+        make_usd_swap_helper(0.0380, ql.Period(15, ql.Years)),
+        make_usd_swap_helper(0.0385, ql.Period(20, ql.Years)),
+        make_usd_swap_helper(0.0380, ql.Period(30, ql.Years)),
     ]
     return build_discount_curve(evaluation_date, deposits, swaps)
