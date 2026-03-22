@@ -128,7 +128,9 @@ clean_pct   = bond.cleanPrice()
 accrued_pct = bond.accruedAmount() / NOTIONAL * 100.0
 
 # YTM: yield consistent with dirty price P
-ytm = bond.bondYield(clean_pct, bond_dc, ql.Compounded, ql.Annual)
+# Newer QuantLib versions require a BondPrice object instead of a raw float.
+# We wrap the clean price in ql.BondPrice(cleanPrice, ql.BondPrice.Clean).
+ytm = bond.bondYield(ql.BondPrice(clean_pct, ql.BondPrice.Clean), bond_dc, ql.Compounded, ql.Annual)
 
 # ==============================================================
 # [6]  B* — BOND CASH FLOWS DISCOUNTED AT PURE OIS
