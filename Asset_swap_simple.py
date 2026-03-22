@@ -246,11 +246,13 @@ ibor_index = ql.Euribor6M(ois_handle)    # OIS-backed float index
 
 # Add a past fixing for the Euribor6M index.
 # QuantLib requires historical fixings for any reset date on or before today.
-# The first floating period's reset date (March 20, 2026) is in the past relative
-# to our evaluation date, so we supply a fixing equal to the OIS forward rate.
-ibor_index.addFixing(ql.Date(20, 3, 2026), ois_curve.forwardRate(
-    ql.Date(20, 3, 2026), ql.Date(20, 9, 2026),
-    ql.Actual360(), ql.Simple).rate())
+# The first floating period's reset date (March 20, 2026) is before our eval date,
+# so we supply a fixing.  We use the forward rate from today (the curve's reference
+# date) to avoid a "negative time" error from querying before the curve start.
+fixing_rate = ois_curve.forwardRate(
+    today, calendar.advance(today, ql.Period("6M")),
+    ql.Actual360(), ql.Simple).rate()
+ibor_index.addFixing(ql.Date(20, 3, 2026), fixing_rate)
 
 bond.setPricingEngine(ql.DiscountingBondEngine(z_handle_ts))
 clean_for_asw = bond.cleanPrice()
