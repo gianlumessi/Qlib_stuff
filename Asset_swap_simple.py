@@ -271,7 +271,21 @@ swap_engine = ql.DiscountingSwapEngine(ois_handle)
 asset_swap.setPricingEngine(swap_engine)
 
 asw_ql  = asset_swap.fairSpread()   # QuantLib solved ASW
-asw_npv = asset_swap.NPV()          # should be ~0
+asw_npv = asset_swap.NPV()          # should NOT be since you are not pricing with the fair ASW (fairSpread)
+
+## Reprice using the fair ASW
+asset_swap_fairSpread = ql.AssetSwap(
+    False,                          # payBondCoupon=False: Citi receives bond coupons
+    bond,
+    clean_for_asw,                  # clean price input (QL uses dirty internally)
+    ibor_index,
+    asw_ql,                            # fairSpread
+    ql.Schedule(),                  # empty → default float schedule from ibor index
+    ibor_index.dayCounter(),
+    True                            # parAssetSwap=True: this is a par asset swap
+)
+asset_swap_fairSpread.setPricingEngine(swap_engine)
+asw_npv_fairSpread = asset_swap_fairSpread.NPV()          # should be ~0
 
 # ==============================================================
 # OUTPUT
@@ -330,7 +344,8 @@ print(f"  IRS float leg (= -N):    {npv_float:>10.4f}%   ← Citi pays ESTR + N;
 print(f"  ASW spread payments:     {npv_asw_pmts:>10.4f}%   ← Citi pays spread over life")
 print(f"  {'─'*40}")
 print(f"  TOTAL NPV:               {npv_total:>10.6f}%  ← should be ~0.000000")
-print(f"\n  QuantLib AssetSwap NPV:  {asw_npv:>10.2f}   ← should be ~0.00")
+print(f"\n  QuantLib AssetSwap NPV priced with 0 ASW:  {asw_npv:>10.2f}   ← should NOT be ~0.00")
+print(f"\n  QuantLib AssetSwap NPV priced with fair ASW:  {asw_npv_fairSpread:>10.2f}   ← should be ~0.00")
 print(f"\n{sep}")
 
 # ==============================================================
