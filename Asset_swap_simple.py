@@ -244,6 +244,14 @@ npv_total    = npv_upfront + npv_Bstar + npv_float + npv_asw_pmts
 # ==============================================================
 ibor_index = ql.Euribor6M(ois_handle)    # OIS-backed float index
 
+# Add a past fixing for the Euribor6M index.
+# QuantLib requires historical fixings for any reset date on or before today.
+# The first floating period's reset date (March 20, 2026) is in the past relative
+# to our evaluation date, so we supply a fixing equal to the OIS forward rate.
+ibor_index.addFixing(ql.Date(20, 3, 2026), ois_curve.forwardRate(
+    ql.Date(20, 3, 2026), ql.Date(20, 9, 2026),
+    ql.Actual360(), ql.Simple).rate())
+
 bond.setPricingEngine(ql.DiscountingBondEngine(z_handle_ts))
 clean_for_asw = bond.cleanPrice()
 
