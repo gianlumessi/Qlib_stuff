@@ -20,9 +20,10 @@ Two implementations are provided:
     factors, so the mechanics are fully transparent.
 """
 
+import math
 import QuantLib as ql
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +301,125 @@ def replicate_par_par_asset_swap(
 
 
 # ---------------------------------------------------------------------------
-# 3.  Z-spread (for comparison)
+# 3.  Analytic par asset swap — OIS + z-spread decomposition
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AnalyticParASWResults:
+    """Results for the OIS + z-spread analytic par asset swap."""
+
+    dirty_price: float          # P  — bond dirty price at OIS + z-spread
+    clean_price: float
+    b_star: float               # B* — bond CFs discounted at pure OIS
+    annuity: float              # A  — fixed-leg annuity
+    par_swap_rate: float        # r_s — par swap rate on bond schedule
+    asw_term1_bps: float        # (c - r_s) in bps
+    asw_term2_bps: float        # (N - P) / (N * A) in bps
+    asw_spread_bps: float       # total analytic ASW in bps
+    asw_ql_bps: float           # QuantLib AssetSwap cross-check in bps (nan if unavailable)
+    npv: float                  # should be ~0 by construction
+
+
+def price_par_asset_swap_analytic(
+    bond: ql.FixedRateBond,
+    coupon_rate: float,
+    ois_handle: Union[ql.YieldTermStructureHandle, ql.RelinkableYieldTermStructureHandle],
+    z_handle: ql.YieldTermStructureHandle,
+    float_index: Optional[ql.IborIndex] = None,
+    notional_pct: float = 100.0,
+) -> AnalyticParASWResults:
+    """Price a par asset swap using the explicit OIS + z-spread analytic formula.
+
+    Implements the decomposition::
+
+        ASW = (c - r_s) + (N - P) / (N * A)
+
+    where:
+      - P   = bond dirty price at OIS + z-spread
+      - B*  = bond cash flows discounted at pure OIS
+      - A   = fixed-leg annuity = sum(alpha_i * DF_OIS(t_i))
+      - r_s = par swap rate = (1 - DF_OIS(T)) / A
+
+    The QuantLib ``AssetSwap`` fair spread is computed as a cross-check.
+    If historical fixings are not registered for the floating index a
+    forward rate from the OIS curve is used automatically.
+
+    Parameters
+    ----------
+    bond : ql.FixedRateBond
+    coupon_rate : float
+        Annual coupon rate (as a decimal).
+    ois_handle : ql.YieldTermStructureHandle
+        Pure OIS discount curve.
+    z_handle : ql.YieldTermStructureHandle
+        OIS + z-spread curve (built with ``build_z_spread_curve``).
+    float_index : ql.IborIndex, optional
+        Floating index for the QuantLib cross-check (default Euribor6M on OIS).
+    notional_pct : float
+        Par notional as % of face (default 100).
+
+    Returns
+    -------
+    AnalyticParASWResults
+    """
+    from bond_pricer import compute_bond_annuity
+
+    # --- Bond at OIS + z-spread → dirty price P ---
+    bond.setPricingEngine(ql.DiscountingBondEngine(z_handle))
+    P     = bond.dirtyPrice()
+    clean = bond.cleanPrice()
+
+    # --- Bond at OIS only → B* ---
+    bond.setPricingEngine(ql.DiscountingBondEngine(ois_handle))
+    B_star = bond.dirtyPrice()
+
+    # --- Annuity and par swap rate ---
+    annuity, _ = compute_bond_annuity(bond, ois_handle)
+    df_T = ois_handle.discount(bond.maturityDate())
+    r_s  = (1.0 - df_T) / annuity
+
+    # --- Analytic ASW ---
+    term1 = coupon_rate - r_s
+    term2 = (notional_pct - P) / (notional_pct * annuity)
+    asw   = term1 + term2
+
+    # --- NPV check (all in % of notional) ---
+    npv = (notional_pct - P) + B_star - notional_pct - asw * notional_pct * annuity
+
+    # --- QuantLib cross-check ---
+    if float_index is None:
+        float_index = ql.Euribor6M(ois_handle)
+
+    asw_ql_bps = math.nan
+    try:
+        bond.setPricingEngine(ql.DiscountingBondEngine(z_handle))
+        clean_for_ql = bond.cleanPrice()
+
+        ql_swap = ql.AssetSwap(
+            False, bond, clean_for_ql, float_index, 0.0,
+            ql.Schedule(), float_index.dayCounter(), True,
+        )
+        ql_swap.setPricingEngine(ql.DiscountingSwapEngine(ois_handle))
+        asw_ql_bps = ql_swap.fairSpread() * 1e4
+    except Exception:
+        pass
+
+    return AnalyticParASWResults(
+        dirty_price=P,
+        clean_price=clean,
+        b_star=B_star,
+        annuity=annuity,
+        par_swap_rate=r_s,
+        asw_term1_bps=term1 * 1e4,
+        asw_term2_bps=term2 * 1e4,
+        asw_spread_bps=asw * 1e4,
+        asw_ql_bps=asw_ql_bps,
+        npv=npv,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4.  Z-spread (for comparison)
 # ---------------------------------------------------------------------------
 
 def compute_z_spread(

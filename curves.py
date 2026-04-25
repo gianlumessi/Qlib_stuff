@@ -13,6 +13,81 @@ import QuantLib as ql
 from typing import Optional
 
 
+def build_zero_curve(
+    evaluation_date: ql.Date,
+    tenors: list,
+    zero_rates: list,
+    calendar: ql.Calendar = ql.TARGET(),
+    day_count: ql.DayCounter = ql.Actual365Fixed(),
+    compounding: int = ql.Continuous,
+    frequency: int = ql.Annual,
+) -> ql.RelinkableYieldTermStructureHandle:
+    """Build a ZeroCurve from tenor strings and zero rates with linear interpolation.
+
+    Parameters
+    ----------
+    evaluation_date : ql.Date
+    tenors : list[str]
+        Pillar tenors, e.g. ["1W","1Y","2Y","5Y","10Y"].
+    zero_rates : list[float]
+        Zero rates for each tenor.  Today's rate is set equal to the first
+        pillar rate (flat short-end extrapolation).
+    calendar : ql.Calendar
+    day_count : ql.DayCounter
+    compounding : int
+        Rate compounding (default Continuous).
+    frequency : int
+
+    Returns
+    -------
+    ql.RelinkableYieldTermStructureHandle
+    """
+    ql.Settings.instance().evaluationDate = evaluation_date
+
+    pillar_dates = [evaluation_date] + [
+        calendar.advance(evaluation_date, ql.Period(t)) for t in tenors
+    ]
+    rates = [zero_rates[0]] + list(zero_rates)
+
+    curve = ql.ZeroCurve(
+        pillar_dates, rates, day_count, calendar,
+        ql.Linear(), compounding, frequency,
+    )
+    curve.enableExtrapolation()
+    return ql.RelinkableYieldTermStructureHandle(curve)
+
+
+def build_z_spread_curve(
+    ois_handle: ql.RelinkableYieldTermStructureHandle,
+    z_spread_bps: float,
+    compounding: int = ql.Continuous,
+    frequency: int = ql.Annual,
+) -> tuple:
+    """Wrap an OIS curve with a flat z-spread.
+
+    Returns the curve handle and the mutable ``SimpleQuote`` so callers can
+    bump the spread without rebuilding the full curve structure.
+
+    Parameters
+    ----------
+    ois_handle : ql.RelinkableYieldTermStructureHandle
+    z_spread_bps : float
+        Z-spread in basis points.
+    compounding : int
+    frequency : int
+
+    Returns
+    -------
+    tuple[ql.YieldTermStructureHandle, ql.SimpleQuote]
+    """
+    z_quote = ql.SimpleQuote(z_spread_bps * 1e-4)
+    z_curve = ql.ZeroSpreadedTermStructure(
+        ois_handle, ql.QuoteHandle(z_quote), compounding, frequency,
+    )
+    z_curve.enableExtrapolation()
+    return ql.YieldTermStructureHandle(z_curve), z_quote
+
+
 def build_discount_curve(
     evaluation_date: ql.Date,
     deposit_helpers: Optional[list] = None,
