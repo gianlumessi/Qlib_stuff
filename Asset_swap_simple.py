@@ -43,7 +43,7 @@ COUPON_RATE      = 0.0345                        # Bond annual coupon rate
 COUPON_FREQUENCY = ql.Semiannual                 # Semi-annual BTP coupons
 Z_SPREAD_BPS     = 74.4                          # Z-spread over OIS in bps
 BOND_MATURITY    = ql.Date(1, ql.February, 2036) # Exact maturity date
-BOND_DATED_DATE  = ql.Date(1, ql.February, 2026) # Last coupon date (accrual start)
+BOND_LAST_COUPON_DATE  = ql.Date(1, ql.February, 2026) # Last coupon date (accrual start)
 
 # Bloomberg reference values for sanity check
 BBG_CLEAN_PRICE = 97.632
@@ -65,7 +65,7 @@ N_PCT    = 100.0    # par expressed as % of notional
 # ==============================================================
 today    = ql.Date(24, 4, 2026)
 calendar = ql.TARGET()
-bond_dc  = ql.Thirty360(ql.Thirty360.BondBasis)
+bond_dc  = ql.ActualActual(ql.ActualActual.ISMA)  # ISMA = ICMA in QuantLib
 ql.Settings.instance().evaluationDate = today
 
 settle = calendar.advance(today, ql.Period("2D"))   # T+2 settlement
@@ -85,7 +85,7 @@ bond = build_bond_from_settle(
     settle_date=settle,
     coupon_rate=COUPON_RATE,
     maturity_date=BOND_MATURITY,
-    dated_date=BOND_DATED_DATE,
+    dated_date=BOND_LAST_COUPON_DATE,
     coupon_frequency=COUPON_FREQUENCY,
     calendar=calendar,
     day_count=bond_dc,
