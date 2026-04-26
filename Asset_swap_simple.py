@@ -35,6 +35,8 @@ import QuantLib as ql
 from curves import build_zero_curve, build_z_spread_curve
 from bond_pricer import build_bond_from_settle, price_bond, compute_bond_annuity
 
+##TODO: Bloomberg uses the EUR vs 6M EURIBOR curve (YCSW0045 Index) to price the floating leg of the asset swap (this is the index of the forwarding, the discounting is still ESTR OIS). Neet to figure out how this works
+
 # ==============================================================
 # [1]  CONFIGURATION  — edit these values to match market data
 # ==============================================================
@@ -51,8 +53,8 @@ BBG_DIRTY_PRICE = 98.4511
 BBG_ASW_BPS     = 72.0
 
 # OIS zero curve  (continuously compounded, Act/365 Fixed).
-# BBG Code of ESTR Swap 1Y: EESWE1
 # See the ECB Data Warehouse (only up to 1Y): https://data.ecb.europa.eu/data/data-categories/financial-markets-and-interest-rates/euro-money-market/compounded-euro-short-term-rates-and-index?layerType=DL
+# BBG Code of ESTR Swap 1Y: EESWE1. This is the index used for discounting in Bloomberg
 OIS_TENORS = ["1W", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y"]
 OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
               0.02558, 0.0260515, 0.026589, 0.0271, 0.027626, 0.02814]
@@ -65,7 +67,7 @@ N_PCT    = 100.0    # par expressed as % of notional
 # ==============================================================
 today    = ql.Date(24, 4, 2026)
 calendar = ql.TARGET()
-bond_dc  = ql.ActualActual(ql.ActualActual.ISMA)  # ISMA = ICMA in QuantLib
+bond_dc  = ql.ActualActual(ql.ActualActual.ISMA)  # Day count convention. ISMA = ICMA in QuantLib
 ql.Settings.instance().evaluationDate = today
 
 settle = calendar.advance(today, ql.Period("2D"))   # T+2 settlement
@@ -260,5 +262,4 @@ print(f"  {'Accrued (%)':22}  {accrued_pct:>12.4f}  {BBG_DIRTY_PRICE-BBG_CLEAN_P
 print(f"  {'ASW - QuantLib (bps)':22}  {asw_ql*10000:>12.4f}  {BBG_ASW_BPS:>12.4f}  {diff_asw_ql:>+10.4f}")
 print(f"  {'ASW - formula (bps)':22}  {ASW*10000:>12.4f}  {BBG_ASW_BPS:>12.4f}  {diff_asw_f:>+10.4f}")
 print(f"  {'-'*60}")
-print(f"  Note: residual diffs reflect day-count convention (30/360 used here vs Act/Act ICMA for BTPs)")
 print(sep)
