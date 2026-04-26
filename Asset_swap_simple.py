@@ -38,9 +38,10 @@ from bond_pricer import build_bond_from_settle, price_bond, compute_bond_annuity
 # ==============================================================
 # [1]  CONFIGURATION  — edit these values to match market data
 # ==============================================================
-COUPON_RATE  = 0.030   # Bond annual coupon rate  (e.g. 0.030 = 3.0%)
-Z_SPREAD_BPS = 100     # Z-spread over OIS in basis points (e.g. 100 bps)
-TENOR        = "10Y"   # Bond tenor from settlement
+### ISIN: IT0005584856, Des: Btp Fx 3.85% Jul34 Eur, Maturity: 01/July/2034
+COUPON_RATE   = 0.0385                      # Bond annual coupon rate
+Z_SPREAD_BPS  = 100                         # Z-spread over OIS in basis points
+BOND_MATURITY = ql.Date(1, ql.July, 2034)   # Exact maturity date
 
 # OIS zero curve  (continuously compounded, Act/365 Fixed)
 OIS_TENORS = ["1W", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y"]
@@ -53,7 +54,7 @@ N_PCT    = 100.0    # par expressed as % of notional
 # ==============================================================
 # [2]  DATES & CONVENTIONS
 # ==============================================================
-today    = ql.Date(22, 3, 2026)
+today    = ql.Date(27, 4, 2026)
 calendar = ql.TARGET()
 bond_dc  = ql.Thirty360(ql.Thirty360.BondBasis)
 ql.Settings.instance().evaluationDate = today
@@ -72,8 +73,8 @@ z_handle, z_quote = build_z_spread_curve(ois_handle, Z_SPREAD_BPS)
 # ==============================================================
 bond = build_bond_from_settle(
     settle_date=settle,
-    tenor=TENOR,
     coupon_rate=COUPON_RATE,
+    maturity_date=BOND_MATURITY,
     calendar=calendar,
     day_count=bond_dc,
 )
@@ -125,7 +126,10 @@ ibor_index = ql.Euribor6M(ois_handle)
 fixing_rate = ois_handle.forwardRate(
     today, calendar.advance(today, ql.Period("6M")),
     ql.Actual360(), ql.Simple).rate()
-ibor_index.addFixing(ql.Date(20, 3, 2026), fixing_rate)
+# Add fixing for the most recent reset date (T-2 from today)
+fixing_date = ibor_index.fixingDate(settle)
+if fixing_date <= today:
+    ibor_index.addFixing(fixing_date, fixing_rate)
 
 bond.setPricingEngine(ql.DiscountingBondEngine(z_handle))
 clean_for_asw = bond.cleanPrice()

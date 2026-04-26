@@ -147,8 +147,9 @@ def price_bond(
 
 def build_bond_from_settle(
     settle_date: ql.Date,
-    tenor: str,
     coupon_rate: float,
+    tenor: Optional[str] = None,
+    maturity_date: Optional[ql.Date] = None,
     face_value: float = 100.0,
     calendar: ql.Calendar = ql.TARGET(),
     coupon_frequency: int = ql.Annual,
@@ -158,17 +159,18 @@ def build_bond_from_settle(
 ) -> ql.FixedRateBond:
     """Build a FixedRateBond whose coupon schedule starts on the settlement date.
 
-    Convenience wrapper around ``build_fixed_rate_bond`` for new-issue bonds
-    where the dated date equals the settlement date.
+    Exactly one of ``tenor`` or ``maturity_date`` must be supplied.
 
     Parameters
     ----------
     settle_date : ql.Date
         First coupon period start (= dated date for new issues).
-    tenor : str
-        Bond tenor, e.g. "10Y", "5Y", "2Y30Y".
     coupon_rate : float
-        Annual coupon rate (e.g. 0.03 for 3 %).
+        Annual coupon rate (e.g. 0.0385 for 3.85 %).
+    tenor : str, optional
+        Bond tenor string, e.g. "10Y".  Used when no exact maturity is known.
+    maturity_date : ql.Date, optional
+        Exact maturity date of the bond.  Takes priority over ``tenor``.
     face_value : float
     calendar : ql.Calendar
     coupon_frequency : int
@@ -180,7 +182,10 @@ def build_bond_from_settle(
     -------
     ql.FixedRateBond
     """
-    maturity_date = calendar.advance(settle_date, ql.Period(tenor))
+    if maturity_date is None and tenor is None:
+        raise ValueError("Provide either 'maturity_date' or 'tenor'.")
+    if maturity_date is None:
+        maturity_date = calendar.advance(settle_date, ql.Period(tenor))
     return build_fixed_rate_bond(
         face_value=face_value,
         issue_date=settle_date,
