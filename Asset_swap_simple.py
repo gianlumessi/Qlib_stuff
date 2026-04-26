@@ -38,15 +38,24 @@ from bond_pricer import build_bond_from_settle, price_bond, compute_bond_annuity
 # ==============================================================
 # [1]  CONFIGURATION  — edit these values to match market data
 # ==============================================================
-### ISIN: IT0005584856, Des: Btp Fx 3.85% Jul34 Eur, Maturity: 01/July/2034
-COUPON_RATE   = 0.0385                      # Bond annual coupon rate
-Z_SPREAD_BPS  = 100                         # Z-spread over OIS in basis points
-BOND_MATURITY = ql.Date(1, ql.July, 2034)   # Exact maturity date
+### ISIN: IT0005676504, Des: Btp 3.45 01/02/2036, Maturity: 01/Feb/2036
+COUPON_RATE      = 0.0345                        # Bond annual coupon rate
+COUPON_FREQUENCY = ql.Semiannual                 # Semi-annual BTP coupons
+Z_SPREAD_BPS     = 74.4                          # Z-spread over OIS in bps
+BOND_MATURITY    = ql.Date(1, ql.February, 2036) # Exact maturity date
+BOND_DATED_DATE  = ql.Date(1, ql.February, 2026) # Last coupon date (accrual start)
 
-# OIS zero curve  (continuously compounded, Act/365 Fixed)
+# Bloomberg reference values for sanity check
+BBG_CLEAN_PRICE = 97.632
+BBG_DIRTY_PRICE = 98.4511
+BBG_ASW_BPS     = 72.0
+
+# OIS zero curve  (continuously compounded, Act/365 Fixed).
+# BBG Code of ESTR Swap 1Y: EESWE1
+# See the ECB Data Warehouse (only up to 1Y): https://data.ecb.europa.eu/data/data-categories/financial-markets-and-interest-rates/euro-money-market/compounded-euro-short-term-rates-and-index?layerType=DL
 OIS_TENORS = ["1W", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y"]
-OIS_ZEROS  = [0.002, 0.005, 0.010, 0.015, 0.020,
-              0.025, 0.030, 0.033, 0.036, 0.039, 0.042]
+OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
+              0.02558, 0.0260515, 0.026589, 0.0271, 0.027626, 0.02814]
 
 NOTIONAL = 100e6    # 100mm par notional
 N_PCT    = 100.0    # par expressed as % of notional
@@ -54,7 +63,7 @@ N_PCT    = 100.0    # par expressed as % of notional
 # ==============================================================
 # [2]  DATES & CONVENTIONS
 # ==============================================================
-today    = ql.Date(27, 4, 2026)
+today    = ql.Date(24, 4, 2026)
 calendar = ql.TARGET()
 bond_dc  = ql.Thirty360(ql.Thirty360.BondBasis)
 ql.Settings.instance().evaluationDate = today
@@ -69,12 +78,15 @@ z_handle, z_quote = build_z_spread_curve(ois_handle, Z_SPREAD_BPS)
 
 # ==============================================================
 # [4]  BUILD BOND
-#      Annual fixed coupon, 30/360 BondBasis, T+2 settlement
+#      Semi-annual fixed coupon, 30/360 BondBasis, T+2 settlement
+#      dated_date = last coupon date so accrued is computed correctly
 # ==============================================================
 bond = build_bond_from_settle(
     settle_date=settle,
     coupon_rate=COUPON_RATE,
     maturity_date=BOND_MATURITY,
+    dated_date=BOND_DATED_DATE,
+    coupon_frequency=COUPON_FREQUENCY,
     calendar=calendar,
     day_count=bond_dc,
 )
@@ -166,7 +178,7 @@ print(f"  {'-'*20}")
 for t, r in zip(OIS_TENORS, OIS_ZEROS):
     print(f"  {t:<8}  {r*100:>9.2f}%")
 
-print(f"\n[2]  BOND PRICING  (coupon c = {COUPON_RATE*100:.1f}%,  z-spread = {Z_SPREAD_BPS} bps)")
+print(f"\n[2]  BOND PRICING  (coupon c = {COUPON_RATE*100:.2f}%,  z-spread = {Z_SPREAD_BPS} bps)")
 print(f"  Settlement date:    {settle}")
 print(f"  Maturity:           {bond.maturityDate()}")
 print(f"  Clean price:        {clean_pct:>10.4f}%   (${clean_pct/100*NOTIONAL/1e6:>7.3f}mm)")
@@ -228,4 +240,25 @@ for z_bps in [0, 25, 50, 75, 100, 150, 200, 250, 300]:
     print(f"  {z_bps:>8} bps  {p_i:>10.4f}  {asw_i:>10.4f} bps")
 
 z_quote.setValue(Z_SPREAD_BPS * 1e-4)   # restore original z-spread
+print(sep)
+
+# ==============================================================
+# BLOOMBERG SANITY CHECK
+# ==============================================================
+print("\n  BLOOMBERG SANITY CHECK  (as of {})".format(today))
+print(f"  {'Metric':<22}  {'Computed':>12}  {'Bloomberg':>12}  {'Diff':>10}")
+print(f"  {'-'*60}")
+
+diff_clean  = clean_pct  - BBG_CLEAN_PRICE
+diff_dirty  = P_pct      - BBG_DIRTY_PRICE
+diff_asw_ql = asw_ql * 10000 - BBG_ASW_BPS
+diff_asw_f  = ASW    * 10000 - BBG_ASW_BPS
+
+print(f"  {'Clean price (%)':22}  {clean_pct:>12.4f}  {BBG_CLEAN_PRICE:>12.4f}  {diff_clean:>+10.4f}")
+print(f"  {'Dirty price (%)':22}  {P_pct:>12.4f}  {BBG_DIRTY_PRICE:>12.4f}  {diff_dirty:>+10.4f}")
+print(f"  {'Accrued (%)':22}  {accrued_pct:>12.4f}  {BBG_DIRTY_PRICE-BBG_CLEAN_PRICE:>12.4f}  {accrued_pct-(BBG_DIRTY_PRICE-BBG_CLEAN_PRICE):>+10.4f}")
+print(f"  {'ASW - QuantLib (bps)':22}  {asw_ql*10000:>12.4f}  {BBG_ASW_BPS:>12.4f}  {diff_asw_ql:>+10.4f}")
+print(f"  {'ASW - formula (bps)':22}  {ASW*10000:>12.4f}  {BBG_ASW_BPS:>12.4f}  {diff_asw_f:>+10.4f}")
+print(f"  {'-'*60}")
+print(f"  Note: residual diffs reflect day-count convention (30/360 used here vs Act/Act ICMA for BTPs)")
 print(sep)

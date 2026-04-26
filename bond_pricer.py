@@ -150,6 +150,7 @@ def build_bond_from_settle(
     coupon_rate: float,
     tenor: Optional[str] = None,
     maturity_date: Optional[ql.Date] = None,
+    dated_date: Optional[ql.Date] = None,
     face_value: float = 100.0,
     calendar: ql.Calendar = ql.TARGET(),
     coupon_frequency: int = ql.Annual,
@@ -157,23 +158,35 @@ def build_bond_from_settle(
     convention: int = ql.ModifiedFollowing,
     settlement_days: int = 2,
 ) -> ql.FixedRateBond:
-    """Build a FixedRateBond whose coupon schedule starts on the settlement date.
+    """Build a FixedRateBond with configurable schedule start and maturity.
 
     Exactly one of ``tenor`` or ``maturity_date`` must be supplied.
+
+    For **new issues** leave ``dated_date`` unset — the coupon schedule starts
+    on ``settle_date`` and accrued interest is zero at inception.
+
+    For **seasoned bonds** set ``dated_date`` to the last coupon payment date
+    (= start of the current coupon period).  QuantLib will then correctly
+    accrue interest from that date to the settlement date.
 
     Parameters
     ----------
     settle_date : ql.Date
-        First coupon period start (= dated date for new issues).
+        Trade settlement date (used as schedule start when ``dated_date``
+        is not provided).
     coupon_rate : float
-        Annual coupon rate (e.g. 0.0385 for 3.85 %).
+        Annual coupon rate (e.g. 0.0345 for 3.45 %).
     tenor : str, optional
         Bond tenor string, e.g. "10Y".  Used when no exact maturity is known.
     maturity_date : ql.Date, optional
-        Exact maturity date of the bond.  Takes priority over ``tenor``.
+        Exact maturity date.  Takes priority over ``tenor``.
+    dated_date : ql.Date, optional
+        Start of the coupon schedule (= last coupon date for seasoned bonds).
+        Defaults to ``settle_date`` when not provided.
     face_value : float
     calendar : ql.Calendar
     coupon_frequency : int
+        Coupon frequency, e.g. ``ql.Annual`` or ``ql.Semiannual``.
     day_count : ql.DayCounter
     convention : int
     settlement_days : int
@@ -186,9 +199,10 @@ def build_bond_from_settle(
         raise ValueError("Provide either 'maturity_date' or 'tenor'.")
     if maturity_date is None:
         maturity_date = calendar.advance(settle_date, ql.Period(tenor))
+    schedule_start = dated_date if dated_date is not None else settle_date
     return build_fixed_rate_bond(
         face_value=face_value,
-        issue_date=settle_date,
+        issue_date=schedule_start,
         maturity_date=maturity_date,
         coupon_rate=coupon_rate,
         coupon_frequency=coupon_frequency,
