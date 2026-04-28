@@ -88,6 +88,80 @@ def build_z_spread_curve(
     return ql.YieldTermStructureHandle(z_curve), z_quote
 
 
+def build_euribor_forwarding_curve(
+    evaluation_date: ql.Date,
+    tenors: list,
+    par_rates: list,
+    ois_discount_handle: ql.RelinkableYieldTermStructureHandle,
+    calendar: ql.Calendar = ql.TARGET(),
+    fixed_frequency: int = ql.Annual,
+    fixed_day_count: ql.DayCounter = ql.Thirty360(ql.Thirty360.BondBasis),
+) -> ql.RelinkableYieldTermStructureHandle:
+    """Bootstrap a EURIBOR 6M forwarding curve using OIS as the discount curve.
+
+    This is the standard dual-curve bootstrap used by Bloomberg for EUR asset
+    swaps: the EURIBOR 6M curve is calibrated to par swap rates (YCSW0045),
+    but all present values are computed with OIS (ESTR) discount factors.
+
+    The 6M pillar uses a deposit rate helper; all longer tenors use swap rate
+    helpers with the OIS curve passed as the exogenous discounting curve.
+
+    Parameters
+    ----------
+    evaluation_date : ql.Date
+    tenors : list[str]
+        Pillar tenors, e.g. ["6M","1Y","2Y",...,"10Y"].
+    par_rates : list[float]
+        Par swap rates for each tenor.
+    ois_discount_handle : ql.RelinkableYieldTermStructureHandle
+        OIS curve used for discounting during the bootstrap.
+    calendar : ql.Calendar
+    fixed_frequency : int
+        Fixed-leg payment frequency (default Annual, EUR convention).
+    fixed_day_count : ql.DayCounter
+        Fixed-leg day count (default 30/360 BondBasis, EUR convention).
+
+    Returns
+    -------
+    ql.RelinkableYieldTermStructureHandle
+    """
+    ql.Settings.instance().evaluationDate = evaluation_date
+
+    # Euribor6M with no curve attached — used as the float index template
+    # during bootstrapping (the curve being built will be linked in later).
+    euribor6m_template = ql.Euribor6M()
+
+    helpers = []
+    for tenor, rate in zip(tenors, par_rates):
+        period = ql.Period(tenor)
+        quote  = ql.QuoteHandle(ql.SimpleQuote(rate))
+
+        if period == ql.Period("6M"):
+            # Short end: treat as a 6M EURIBOR deposit (Act/360)
+            helpers.append(ql.DepositRateHelper(
+                quote, period, 2, calendar,
+                ql.ModifiedFollowing, False, ql.Actual360(),
+            ))
+        else:
+            # Longer tenors: par swap rate with OIS exogenous discounting
+            helpers.append(ql.SwapRateHelper(
+                quote,
+                period,
+                calendar,
+                fixed_frequency,
+                ql.ModifiedFollowing,
+                fixed_day_count,
+                euribor6m_template,
+                ql.QuoteHandle(),        # no spread on float leg
+                ql.Period("0D"),         # spot-starting
+                ois_discount_handle,     # OIS discounting
+            ))
+
+    curve = ql.PiecewiseLogCubicDiscount(evaluation_date, helpers, ql.Actual365Fixed())
+    curve.enableExtrapolation()
+    return ql.RelinkableYieldTermStructureHandle(curve)
+
+
 def build_discount_curve(
     evaluation_date: ql.Date,
     deposit_helpers: Optional[list] = None,
