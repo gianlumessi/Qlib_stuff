@@ -1,18 +1,18 @@
 """
 ===============================================================
   PAR ASSET SWAP PRICING — QuantLib modular implementation
-  Priced from Citigroup's perspective
+  Priced from Bank's perspective
 ===============================================================
 
 STRUCTURE:
-  - Client pays par (N = 100mm) to Citigroup
-  - Citigroup buys bond at dirty price P in the market
-  - Citigroup pockets upfront: (N - P)
+  - Client pays par (N = 100mm) to Bank
+  - Bank buys bond at dirty price P in the market
+  - Bank pockets upfront: (N - P)
   - Interest rate swap leg:
-      Citi RECEIVES: bond coupons + bond redemption N at maturity
-      Citi PAYS    : floating (ESTR flat) + ASW spread + notional N at maturity
+      Bank RECEIVES: bond coupons + bond redemption N at maturity
+      Bank PAYS    : floating (ESTR flat) + ASW spread + notional N at maturity
 
-PRICING CONDITION  (NPV = 0 from Citi's view):
+PRICING CONDITION  (NPV = 0 from Bank's view):
   (N - P) + B* - N - ASW * N * A = 0
 
   Solving for ASW:
@@ -220,7 +220,7 @@ ASW_mkt   = term1_mkt + term2_mkt
 sep = "=" * 62
 
 print(sep)
-print("  PAR ASSET SWAP — CITIGROUP PERSPECTIVE")
+print("  PAR ASSET SWAP — BANK PERSPECTIVE")
 print(sep)
 
 print("\n[1]  OIS CURVE ZERO RATES  (continuously compounded, Act/365)")
@@ -275,11 +275,11 @@ print(f"  ASW  (QuantLib/mkt)   =  {asw_ql_mkt*10000:>8.4f} bps")
 print(f"  Difference            =  {(ASW_mkt - asw_ql_mkt)*10000:>8.4f} bps  "
       f"({'ok - small rounding only' if abs(ASW_mkt-asw_ql_mkt)*10000 < 1 else '!! check schedules'})")
 
-print(f"\n[6]  NPV CHECK — CITI  (all in % of notional, should sum to 0)")
+print(f"\n[6]  NPV CHECK — BANK  (all in % of notional, should sum to 0)")
 print(f"  Upfront (N - P):         {npv_upfront:>10.4f}%")
-print(f"  IRS fixed leg B*:        {npv_Bstar:>10.4f}%   <- Citi receives bond CFs at OIS")
-print(f"  IRS float leg (= -N):    {npv_float:>10.4f}%   <- Citi pays ESTR + N; = par")
-print(f"  ASW spread payments:     {npv_asw_pmts:>10.4f}%   <- Citi pays spread over life")
+print(f"  IRS fixed leg B*:        {npv_Bstar:>10.4f}%   <- Bank receives bond CFs at OIS")
+print(f"  IRS float leg (= -N):    {npv_float:>10.4f}%   <- Bank pays ESTR + N; = par")
+print(f"  ASW spread payments:     {npv_asw_pmts:>10.4f}%   <- Bank pays spread over life")
 print(f"  {'-'*40}")
 print(f"  TOTAL NPV:               {npv_total:>10.6f}%  <- should be ~0.000000")
 print(f"\n  QuantLib ASW NPV (0 spread):    {asw_npv:>10.2f}   <- should NOT be ~0.00")
