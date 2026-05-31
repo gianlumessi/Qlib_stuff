@@ -1,37 +1,33 @@
 """
 ===============================================================
-  COUNTERPARTY EXPOSURE PROFILE — FIXED-FOR-FIXED ASSET SWAP
-  Par-par asset swap on Italian BTP, OIS single-curve framework
+  COUNTERPARTY EXPOSURE PROFILES — PAR-PAR ASSET SWAP
+  Fixed-for-Fixed vs Fixed-for-Floating, OIS single-curve
 ===============================================================
 
-STRUCTURE (Bank's perspective):
-  - Client pays par (N = 100) to the Bank
-  - Bank buys bond at dirty price P in the market
-  - Upfront to bank: N - P (positive for discount bond)
-  - Swap legs (same semi-annual schedule as bond coupons):
-      Bank RECEIVES: bond coupon rate c on notional N
-      Bank PAYS:     fixed rate K = (r_s + ASW) on notional N
-  - Both legs exchange notional N at maturity (these cancel in MtM)
-  - ASW is solved so that: (N - P) + swap_MtM_0 = 0
-  - swap_MtM_0 = (c - K) * N * A = -(N - P) = P - N
+Two swap structures are compared, both on the same Italian BTP:
 
-  Since c < K (bank pays more than it receives), the swap MtM is
-  always NEGATIVE from the bank's perspective.  The bank compensated
-  for this via the upfront (N - P).
+  FIXED-FOR-FIXED:
+    Bank RECEIVES: bond coupon c (fixed)
+    Bank PAYS:     K = r_s + ASW (fixed)
+    MtM = (c - K) * N * A_rem
+    Always one-sided (bank always OTM) because c < K.
 
-  After inception, the exposure profile is one-sided:
-    EPE = 0  (bank never has positive exposure on the swap)
-    ENE < 0  (bank is always out-of-the-money)
+  FIXED-FOR-FLOATING:
+    Bank RECEIVES: bond coupon c (fixed)
+    Bank PAYS:     OIS forward + ASW (floating)
+    MtM = (c - ASW) * N * A_rem - N * (1 - DF_fwd(obs, T))
+    Two-sided: rate falls → bank gains (fixed > float);
+               rate rises → bank loses (fixed < float).
 
-  This correctly reflects that in a par-par ASW, the BANK has no
-  counterparty credit risk — it is the CLIENT who bears exposure.
+Both use the same ASW spread in the single-curve OIS framework:
+  ASW = (c - r_s) + (N - P) / (N * A)
 
 EXPOSURE SIMULATION:
-  - 10 observation dates (annual coupon payment dates)
+  - 10 observation dates (annual coupon dates)
   - Parallel shift to all OIS zero rates: dz ~ N(0, sigma)
-  - sigma = 10% (= 0.001, i.e. 10 basis points absolute normal vol)
-  - 1500 Monte Carlo paths
-  - MtM = PV(received leg) - PV(paid leg)  [excl. upfront, excl. redemption]
+  - sigma = 10 bps absolute normal vol
+  - 1500 Monte Carlo paths (identical shifts for both structures)
+  - EPE, ENE, PFE (95th), NFE (5th)
 
 REQUIREMENTS:
   pip install QuantLib numpy matplotlib
@@ -58,7 +54,6 @@ OIS_TENORS = ["1W", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y"]
 OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
               0.02558, 0.0260515, 0.026589, 0.0271, 0.027626, 0.02814]
 
-# Monte Carlo parameters
 N_PATHS = 1500
 SIGMA   = 0.001   # 10 bps absolute normal vol for parallel shifts
 np.random.seed(42)
@@ -78,7 +73,6 @@ settle = calendar.advance(today, ql.Period("2D"))
 # [3]  HELPER: BUILD OIS CURVE FROM ZERO RATES
 # ==============================================================
 def build_ois_curve(zeros):
-    """Build a ZeroCurve from the OIS pillar rates (continuously compounded)."""
     pillar_dates = [today] + [calendar.advance(today, ql.Period(t)) for t in OIS_TENORS]
     rates = [zeros[0]] + list(zeros)
     curve = ql.ZeroCurve(
@@ -101,14 +95,9 @@ schedule = ql.Schedule(
 
 all_schedule_dates = list(schedule)
 
-# Coupon payment dates (all dates after the first schedule date)
-# Only future ones (after settlement) contribute to the swap
 coupon_dates = [d for d in all_schedule_dates[1:] if d > settle]
 
-# Period start dates for year-fraction computation:
-# First period starts at BOND_LAST_COUPON_DATE (matching the reference),
-# subsequent periods start at the previous coupon date.
-all_period_starts = all_schedule_dates[:-1]  # all but last = period start dates
+all_period_starts = all_schedule_dates[:-1]
 period_starts = []
 for s in all_period_starts:
     end_idx = all_schedule_dates.index(s) + 1
@@ -117,55 +106,55 @@ for s in all_period_starts:
         period_starts.append(s)
 
 # ==============================================================
-# [5]  COMPUTE ANNUITY, PAR SWAP RATE, AND ASW AT INCEPTION
+# [5]  COMPUTE ANNUITY, PAR SWAP RATE, AND ASW
 #
-#      A = Σ alpha_i * DF_OIS(0, t_i)   over all future coupon dates
+#      A = Sigma alpha_i * DF(0, t_i)
 #      r_s = (1 - DF(T)) / A
 #      ASW = (c - r_s) + (N - P) / (N * A)
 #      K = r_s + ASW = c + (N - P) / (N * A)
-#      Swap MtM at t=0 = (c - K) * N * A = -(N - P) = P - N
+#
+#      In the single-curve OIS framework, the ASW spread is the same
+#      whether the bank pays fixed (K) or floating (OIS + ASW).
 # ==============================================================
 base_curve = build_ois_curve(OIS_ZEROS)
 
 annuity = 0.0
-annuity_details = []
 for s, e in zip(period_starts, coupon_dates):
     alpha = bond_dc.yearFraction(s, e)
     df    = base_curve.discount(e)
     annuity += alpha * df
-    annuity_details.append((e, alpha, df, alpha * df))
 
 df_T = base_curve.discount(BOND_MATURITY)
 r_s  = (1.0 - df_T) / annuity
 ASW  = (COUPON_RATE - r_s) + (N_PCT - BBG_DIRTY_PRICE) / (N_PCT * annuity)
+K    = r_s + ASW
 
-# Fixed rate the bank pays
-K = r_s + ASW  # equivalently: K = c + (N - P) / (N * A)
+upfront = BBG_DIRTY_PRICE - N_PCT   # P - N (negative for discount bond)
 
-# Verify MtM at inception = P - N (the swap starts at negative value for bank)
-swap_mtm_0 = (COUPON_RATE - K) * N_PCT * annuity
-upfront = BBG_DIRTY_PRICE - N_PCT   # = P - N (negative for discount bond)
+# Verify inception MtM for both structures = P - N
+fix_fix_mtm0   = (COUPON_RATE - K) * N_PCT * annuity
+fix_float_mtm0 = (COUPON_RATE - ASW) * N_PCT * annuity - N_PCT * (1.0 - df_T)
 
-print("=" * 68)
-print("  FIXED-FOR-FIXED ASSET SWAP — COUNTERPARTY EXPOSURE")
-print("=" * 68)
+sep = "=" * 68
+print(sep)
+print("  COUNTERPARTY EXPOSURE — FIX-FIX vs FIX-FLOAT ASSET SWAP")
+print(sep)
 
 print(f"\n[1]  SWAP PARAMETERS AT INCEPTION")
 print(f"  Bond coupon c:           {COUPON_RATE*100:.4f}%")
 print(f"  OIS par swap rate r_s:   {r_s*100:.4f}%")
 print(f"  ASW spread:              {ASW*10000:.2f} bps")
-print(f"  Bank pays K = r_s+ASW:   {K*100:.4f}%")
+print(f"  Fix-fix: bank pays K:    {K*100:.4f}%")
+print(f"  Fix-float: bank pays:    OIS + {ASW*10000:.2f} bps")
 print(f"  Annuity A:               {annuity:.6f}")
 print(f"  DF(0,T):                 {df_T:.6f}")
 print(f"  Dirty price P:           {BBG_DIRTY_PRICE:.4f}%")
 print(f"  Upfront (P - N):         {upfront:.4f}%")
-print(f"  Swap MtM at t=0:         {swap_mtm_0:.4f}%")
-print(f"  Check (should be P-N):   {upfront:.4f}% = {swap_mtm_0:.4f}%  "
-      f"{'OK' if abs(swap_mtm_0 - upfront) < 0.001 else 'MISMATCH'}")
+print(f"  Fix-fix  MtM at t=0:     {fix_fix_mtm0:.4f}%  (should be {upfront:.4f}%)")
+print(f"  Fix-float MtM at t=0:    {fix_float_mtm0:.4f}%  (should be {upfront:.4f}%)")
 
 # ==============================================================
-# [6]  TENOR GRID FOR EXPOSURE OBSERVATION
-#      10 equally-spaced points across the swap's remaining life
+# [6]  TENOR GRID — 10 annual coupon dates
 # ==============================================================
 n_tenors = 10
 step = max(1, len(coupon_dates) // n_tenors)
@@ -177,104 +166,169 @@ for i, (d, y) in enumerate(zip(tenor_dates, tenor_years)):
     print(f"    {i+1:>2}. {d}  ({y:.2f}Y)")
 
 # ==============================================================
-# [7]  MONTE CARLO EXPOSURE SIMULATION
-#
-#      At each observation date t_k:
-#        1. Draw parallel shift dz ~ N(0, sigma)
-#        2. Shifted curve: z_new = z_base + dz for all pillars
-#        3. Compute remaining annuity A_rem(t_k) on shifted curve
-#           (only future coupon dates after t_k)
-#        4. MtM = (c - K) * N * A_rem
-#           (redemption flows cancel on both legs)
-#
-#      Since c < K, MtM is always negative — bank has no positive
-#      exposure.  The magnitude varies with A_rem as rates shift.
+# [7]  GENERATE SHARED MONTE CARLO SHIFTS
+#      Same random paths used for both structures so the comparison
+#      isolates the structural difference, not sampling noise.
 # ==============================================================
+shifts = np.random.normal(0.0, SIGMA, size=(N_PATHS, len(tenor_dates)))
+
 print(f"\n[3]  MONTE CARLO SIMULATION")
 print(f"  Paths: {N_PATHS},  Sigma: {SIGMA*10000:.0f} bps,  Tenors: {len(tenor_dates)}")
 
-shifts = np.random.normal(0.0, SIGMA, size=(N_PATHS, len(tenor_dates)))
-mtm_matrix = np.zeros((N_PATHS, len(tenor_dates)))
-
-coupon_diff = COUPON_RATE - K   # fixed negative spread
+# ==============================================================
+# [8]  FIXED-FOR-FIXED EXPOSURE SIMULATION
+#
+#      MtM = (c - K) * N * A_rem(shifted)
+#
+#      Since c < K, MtM is always negative regardless of shift.
+#      The annuity magnitude changes with rates but the sign cannot.
+# ==============================================================
+mtm_fixfix = np.zeros((N_PATHS, len(tenor_dates)))
+coupon_diff_ff = COUPON_RATE - K
 
 for t_idx, obs_date in enumerate(tenor_dates):
-    # Remaining coupon dates and their period starts (after obs_date)
     rem_coupons = [(s, e) for s, e in zip(period_starts, coupon_dates) if e > obs_date]
-
     if not rem_coupons:
         continue
 
     for path in range(N_PATHS):
-        dz = shifts[path, t_idx]
-        shifted_zeros = [z + dz for z in OIS_ZEROS]
-        shifted_curve = build_ois_curve(shifted_zeros)
-
-        # DF from today to obs_date (for forward DF computation)
+        shifted_curve = build_ois_curve([z + shifts[path, t_idx] for z in OIS_ZEROS])
         df_obs = shifted_curve.discount(obs_date)
 
-        # Remaining annuity as seen from obs_date (forward DFs)
-        rem_annuity = 0.0
-        for s, e in rem_coupons:
-            alpha = bond_dc.yearFraction(s, e)
-            df_e  = shifted_curve.discount(e)
-            df_fwd = df_e / df_obs   # forward DF from obs to e
-            rem_annuity += alpha * df_fwd
+        rem_annuity = sum(
+            bond_dc.yearFraction(s, e) * shifted_curve.discount(e) / df_obs
+            for s, e in rem_coupons
+        )
+        mtm_fixfix[path, t_idx] = coupon_diff_ff * N_PCT * rem_annuity
 
-        # MtM of remaining swap (redemptions cancel)
-        mtm_matrix[path, t_idx] = coupon_diff * N_PCT * rem_annuity
-
-print("  Simulation complete.")
+print("  Fix-fix simulation complete.")
 
 # ==============================================================
-# [8]  EXPOSURE METRICS
+# [9]  FIXED-FOR-FLOATING EXPOSURE SIMULATION
 #
-#      EPE  = E[max(MtM, 0)]         expected positive exposure
-#      ENE  = E[min(MtM, 0)]         expected negative exposure
-#      PFE  = 95th pctl of MtM       potential future exposure
-#      NFE  = 5th pctl of MtM        negative future exposure
+#      MtM = (c - ASW) * N * A_rem  -  N * (1 - DF_fwd(obs, T))
+#
+#      First term:  PV of fixed coupons net of spread, discounted
+#      Second term: PV of OIS floating coupons (telescopes to 1-DF)
+#
+#      When rates FALL:
+#        A_rem increases, DF_fwd(T) increases → (1-DF_fwd) shrinks
+#        → fixed leg gains value, floating leg pays less → MtM rises
+#
+#      When rates RISE:
+#        A_rem decreases, DF_fwd(T) decreases → (1-DF_fwd) grows
+#        → fixed leg loses value, floating leg pays more → MtM falls
+#
+#      This creates two-sided exposure (classic receiver swap profile).
 # ==============================================================
-EPE = np.maximum(mtm_matrix, 0.0).mean(axis=0)
-ENE = np.minimum(mtm_matrix, 0.0).mean(axis=0)
-PFE = np.percentile(mtm_matrix, 95, axis=0)
-NFE = np.percentile(mtm_matrix, 5, axis=0)
+mtm_fixflt = np.zeros((N_PATHS, len(tenor_dates)))
+c_minus_asw = COUPON_RATE - ASW
 
-print(f"\n[4]  EXPOSURE PROFILE (% of notional, bank perspective)")
+for t_idx, obs_date in enumerate(tenor_dates):
+    rem_coupons = [(s, e) for s, e in zip(period_starts, coupon_dates) if e > obs_date]
+    if not rem_coupons:
+        continue
+
+    for path in range(N_PATHS):
+        shifted_curve = build_ois_curve([z + shifts[path, t_idx] for z in OIS_ZEROS])
+        df_obs = shifted_curve.discount(obs_date)
+
+        # Remaining annuity (forward DFs from obs_date)
+        rem_annuity = sum(
+            bond_dc.yearFraction(s, e) * shifted_curve.discount(e) / df_obs
+            for s, e in rem_coupons
+        )
+
+        # Forward DF from obs_date to maturity
+        df_fwd_T = shifted_curve.discount(BOND_MATURITY) / df_obs
+
+        # MtM = PV(fixed received) - PV(floating paid)
+        # PV(fixed) = c * N * A_rem
+        # PV(float) = N * (1 - DF_fwd_T) + ASW * N * A_rem
+        # MtM = (c - ASW) * N * A_rem - N * (1 - DF_fwd_T)
+        mtm_fixflt[path, t_idx] = c_minus_asw * N_PCT * rem_annuity \
+                                  - N_PCT * (1.0 - df_fwd_T)
+
+print("  Fix-float simulation complete.")
+
+# ==============================================================
+# [10]  EXPOSURE METRICS FOR BOTH STRUCTURES
+# ==============================================================
+def compute_exposure_metrics(mtm):
+    epe = np.maximum(mtm, 0.0).mean(axis=0)
+    ene = np.minimum(mtm, 0.0).mean(axis=0)
+    pfe = np.percentile(mtm, 95, axis=0)
+    nfe = np.percentile(mtm, 5, axis=0)
+    return epe, ene, pfe, nfe
+
+EPE_ff, ENE_ff, PFE_ff, NFE_ff = compute_exposure_metrics(mtm_fixfix)
+EPE_fl, ENE_fl, PFE_fl, NFE_fl = compute_exposure_metrics(mtm_fixflt)
+
+print(f"\n[4a] FIX-FIX EXPOSURE (% of notional, bank perspective)")
 print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
 print(f"  {'-'*50}")
 for i, y in enumerate(tenor_years):
-    print(f"  {y:>7.2f}Y  {EPE[i]:>8.4f}  {ENE[i]:>8.4f}  {PFE[i]:>10.4f}  {NFE[i]:>10.4f}")
+    print(f"  {y:>7.2f}Y  {EPE_ff[i]:>8.4f}  {ENE_ff[i]:>8.4f}  {PFE_ff[i]:>10.4f}  {NFE_ff[i]:>10.4f}")
 
-print(f"\n  Note: EPE ~ 0 because c < K (bank always out-of-the-money).")
-print(f"  The CLIENT has the counterparty exposure, not the bank.")
+print(f"\n  EPE ~ 0: c < K so bank is always OTM (one-sided exposure).")
+
+print(f"\n[4b] FIX-FLOAT EXPOSURE (% of notional, bank perspective)")
+print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
+print(f"  {'-'*50}")
+for i, y in enumerate(tenor_years):
+    print(f"  {y:>7.2f}Y  {EPE_fl[i]:>8.4f}  {ENE_fl[i]:>8.4f}  {PFE_fl[i]:>10.4f}  {NFE_fl[i]:>10.4f}")
+
+print(f"\n  Two-sided: rates down → EPE > 0 (bank gains on fixed leg).")
+print(f"             rates up   → ENE < 0 (floating leg costs more).")
 
 # ==============================================================
-# [9]  PLOT
+# [11]  SIDE-BY-SIDE PLOT
 # ==============================================================
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
 
-ax.plot(tenor_years, EPE, "b-o", linewidth=2, markersize=5, label="EPE (mean of positive MtM)")
-ax.plot(tenor_years, ENE, "r-o", linewidth=2, markersize=5, label="ENE (mean of negative MtM)")
-ax.plot(tenor_years, PFE, "b--s", linewidth=1.5, markersize=4, label="PFE (95th percentile)")
-ax.plot(tenor_years, NFE, "r--s", linewidth=1.5, markersize=4, label="NFE (5th percentile)")
-ax.axhline(0, color="grey", linewidth=0.8, linestyle="-")
-
-ax.fill_between(tenor_years, 0, EPE, alpha=0.1, color="blue")
-ax.fill_between(tenor_years, ENE, 0, alpha=0.1, color="red")
-
-ax.set_xlabel("Time (years)", fontsize=11)
-ax.set_ylabel("Exposure (% of notional)", fontsize=11)
-ax.set_title(
-    "Counterparty Exposure Profile — Fixed-for-Fixed Par-Par Asset Swap\n"
-    f"BTP {COUPON_RATE*100:.2f}% | Bank pays {K*100:.2f}% | "
-    f"ASW={ASW*10000:.0f}bps | {N_PATHS} paths | $\\sigma$={SIGMA*10000:.0f}bps",
+# ---- Left: Fixed-for-Fixed ----
+ax1.plot(tenor_years, EPE_ff, "b-o",  lw=2, ms=5, label="EPE")
+ax1.plot(tenor_years, ENE_ff, "r-o",  lw=2, ms=5, label="ENE")
+ax1.plot(tenor_years, PFE_ff, "b--s", lw=1.5, ms=4, label="PFE (95%)")
+ax1.plot(tenor_years, NFE_ff, "r--s", lw=1.5, ms=4, label="NFE (5%)")
+ax1.axhline(0, color="grey", lw=0.8)
+ax1.fill_between(tenor_years, 0, EPE_ff, alpha=0.1, color="blue")
+ax1.fill_between(tenor_years, ENE_ff, 0, alpha=0.1, color="red")
+ax1.set_xlabel("Time (years)", fontsize=11)
+ax1.set_ylabel("Exposure (% of notional)", fontsize=11)
+ax1.set_title(
+    "Fixed-for-Fixed\n"
+    f"Bank receives {COUPON_RATE*100:.2f}%, pays {K*100:.2f}% fixed",
     fontsize=11,
 )
-ax.legend(loc="lower right", fontsize=10)
-ax.grid(True, alpha=0.3)
-ax.set_xlim(0, tenor_years[-1] + 0.5)
+ax1.legend(loc="best", fontsize=9)
+ax1.grid(True, alpha=0.3)
+ax1.set_xlim(0, tenor_years[-1] + 0.5)
 
+# ---- Right: Fixed-for-Floating ----
+ax2.plot(tenor_years, EPE_fl, "b-o",  lw=2, ms=5, label="EPE")
+ax2.plot(tenor_years, ENE_fl, "r-o",  lw=2, ms=5, label="ENE")
+ax2.plot(tenor_years, PFE_fl, "b--s", lw=1.5, ms=4, label="PFE (95%)")
+ax2.plot(tenor_years, NFE_fl, "r--s", lw=1.5, ms=4, label="NFE (5%)")
+ax2.axhline(0, color="grey", lw=0.8)
+ax2.fill_between(tenor_years, 0, EPE_fl, alpha=0.15, color="blue")
+ax2.fill_between(tenor_years, ENE_fl, 0, alpha=0.15, color="red")
+ax2.set_xlabel("Time (years)", fontsize=11)
+ax2.set_title(
+    "Fixed-for-Floating\n"
+    f"Bank receives {COUPON_RATE*100:.2f}% fixed, pays OIS + {ASW*10000:.0f}bps",
+    fontsize=11,
+)
+ax2.legend(loc="best", fontsize=9)
+ax2.grid(True, alpha=0.3)
+ax2.set_xlim(0, tenor_years[-1] + 0.5)
+
+fig.suptitle(
+    f"Counterparty Exposure — Par-Par Asset Swap on BTP | "
+    f"{N_PATHS} paths | $\\sigma$ = {SIGMA*10000:.0f} bps",
+    fontsize=12, fontweight="bold", y=1.02,
+)
 plt.tight_layout()
-plt.savefig("plots/exposure_asw.png", dpi=150)
+plt.savefig("plots/exposure_asw.png", dpi=150, bbox_inches="tight")
 print(f"\n  Plot saved to plots/exposure_asw.png")
-print("=" * 68)
+print(sep)
