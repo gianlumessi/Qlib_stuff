@@ -300,13 +300,13 @@ print(f"             rates up   → ENE < 0 (floating leg costs more).")
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
 
 # ---- Left: Fixed-for-Fixed ----
-ax1.plot(tenor_years, EPE_ff, "b-o",  lw=2, ms=5, label="EPE")
-ax1.plot(tenor_years, ENE_ff, "r-o",  lw=2, ms=5, label="ENE")
-ax1.plot(tenor_years, PFE_ff, "b--s", lw=1.5, ms=4, label="PFE (95%)")
-ax1.plot(tenor_years, NFE_ff, "r--s", lw=1.5, ms=4, label="NFE (5%)")
+for p in range(N_PATHS):
+    ax1.plot(tenor_years, mtm_fixfix[p, :], color="grey", alpha=0.05, lw=0.5)
+ax1.plot(tenor_years, EPE_ff, "b-o",  lw=2, ms=5, label="EPE", zorder=5)
+ax1.plot(tenor_years, ENE_ff, "r-o",  lw=2, ms=5, label="ENE", zorder=5)
+ax1.plot(tenor_years, PFE_ff, "b--s", lw=1.5, ms=4, label="PFE (95%)", zorder=5)
+ax1.plot(tenor_years, NFE_ff, "r--s", lw=1.5, ms=4, label="NFE (5%)", zorder=5)
 ax1.axhline(0, color="grey", lw=0.8)
-ax1.fill_between(tenor_years, 0, EPE_ff, alpha=0.1, color="blue")
-ax1.fill_between(tenor_years, ENE_ff, 0, alpha=0.1, color="red")
 ax1.set_xlabel("Time (years)", fontsize=11)
 ax1.set_ylabel("Exposure (% of notional)", fontsize=11)
 ax1.set_title(
@@ -319,13 +319,13 @@ ax1.grid(True, alpha=0.3)
 ax1.set_xlim(0, tenor_years[-1] + 0.5)
 
 # ---- Right: Fixed-for-Floating ----
-ax2.plot(tenor_years, EPE_fl, "b-o",  lw=2, ms=5, label="EPE")
-ax2.plot(tenor_years, ENE_fl, "r-o",  lw=2, ms=5, label="ENE")
-ax2.plot(tenor_years, PFE_fl, "b--s", lw=1.5, ms=4, label="PFE (95%)")
-ax2.plot(tenor_years, NFE_fl, "r--s", lw=1.5, ms=4, label="NFE (5%)")
+for p in range(N_PATHS):
+    ax2.plot(tenor_years, mtm_fixflt[p, :], color="grey", alpha=0.05, lw=0.5)
+ax2.plot(tenor_years, EPE_fl, "b-o",  lw=2, ms=5, label="EPE", zorder=5)
+ax2.plot(tenor_years, ENE_fl, "r-o",  lw=2, ms=5, label="ENE", zorder=5)
+ax2.plot(tenor_years, PFE_fl, "b--s", lw=1.5, ms=4, label="PFE (95%)", zorder=5)
+ax2.plot(tenor_years, NFE_fl, "r--s", lw=1.5, ms=4, label="NFE (5%)", zorder=5)
 ax2.axhline(0, color="grey", lw=0.8)
-ax2.fill_between(tenor_years, 0, EPE_fl, alpha=0.15, color="blue")
-ax2.fill_between(tenor_years, ENE_fl, 0, alpha=0.15, color="red")
 ax2.set_xlabel("Time (years)", fontsize=11)
 ax2.set_title(
     "Fixed-for-Floating\n"
