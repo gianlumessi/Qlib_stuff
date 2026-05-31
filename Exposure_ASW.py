@@ -56,7 +56,7 @@ OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
 
 N_PATHS   = 1500
 N_TENORS  = 100
-SIGMA     = 0.10     # 10 pp absolute normal vol per step
+SIGMA     = 0.010     # percentage absolute normal vol per step
 np.random.seed(42)
 
 # Swap 1 parameters
