@@ -253,6 +253,10 @@ print("  Fix-float simulation complete.")
 
 # ==============================================================
 # [10]  EXPOSURE METRICS FOR BOTH STRUCTURES
+#
+#       Time 0 is deterministic (no simulation): all paths have the
+#       same inception MtM = P - N.  Prepend this known value so
+#       all four profiles start from the single t=0 point.
 # ==============================================================
 def compute_exposure_metrics(mtm):
     epe = np.maximum(mtm, 0.0).mean(axis=0)
@@ -261,22 +265,42 @@ def compute_exposure_metrics(mtm):
     nfe = np.percentile(mtm, 5, axis=0)
     return epe, ene, pfe, nfe
 
-EPE_ff, ENE_ff, PFE_ff, NFE_ff = compute_exposure_metrics(mtm_fixfix)
-EPE_fl, ENE_fl, PFE_fl, NFE_fl = compute_exposure_metrics(mtm_fixflt)
+EPE_ff_sim, ENE_ff_sim, PFE_ff_sim, NFE_ff_sim = compute_exposure_metrics(mtm_fixfix)
+EPE_fl_sim, ENE_fl_sim, PFE_fl_sim, NFE_fl_sim = compute_exposure_metrics(mtm_fixflt)
+
+# Deterministic t=0 value: all profiles collapse to the inception MtM
+mtm0 = upfront   # = P - N = -1.5489%
+t0_epe = max(mtm0, 0.0)
+t0_ene = min(mtm0, 0.0)
+
+# Prepend t=0 to tenor grid and all exposure arrays
+plot_years = [0.0] + list(tenor_years)
+
+EPE_ff = np.concatenate([[t0_epe], EPE_ff_sim])
+ENE_ff = np.concatenate([[t0_ene], ENE_ff_sim])
+PFE_ff = np.concatenate([[mtm0],  PFE_ff_sim])
+NFE_ff = np.concatenate([[mtm0],  NFE_ff_sim])
+
+EPE_fl = np.concatenate([[t0_epe], EPE_fl_sim])
+ENE_fl = np.concatenate([[t0_ene], ENE_fl_sim])
+PFE_fl = np.concatenate([[mtm0],  PFE_fl_sim])
+NFE_fl = np.concatenate([[mtm0],  NFE_fl_sim])
 
 print(f"\n[4a] FIX-FIX EXPOSURE (% of notional, bank perspective)")
 print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
 print(f"  {'-'*50}")
-for i, y in enumerate(tenor_years):
-    print(f"  {y:>7.2f}Y  {EPE_ff[i]:>8.4f}  {ENE_ff[i]:>8.4f}  {PFE_ff[i]:>10.4f}  {NFE_ff[i]:>10.4f}")
+for i, y in enumerate(plot_years):
+    print(f"  {y:>7.2f}Y  {EPE_ff[i]:>8.4f}  {ENE_ff[i]:>8.4f}  {PFE_ff[i]:>10.4f}  {NFE_ff[i]:>10.4f}"
+          + ("  <- deterministic" if y == 0.0 else ""))
 
 print(f"\n  EPE ~ 0: c < K so bank is always OTM (one-sided exposure).")
 
 print(f"\n[4b] FIX-FLOAT EXPOSURE (% of notional, bank perspective)")
 print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
 print(f"  {'-'*50}")
-for i, y in enumerate(tenor_years):
-    print(f"  {y:>7.2f}Y  {EPE_fl[i]:>8.4f}  {ENE_fl[i]:>8.4f}  {PFE_fl[i]:>10.4f}  {NFE_fl[i]:>10.4f}")
+for i, y in enumerate(plot_years):
+    print(f"  {y:>7.2f}Y  {EPE_fl[i]:>8.4f}  {ENE_fl[i]:>8.4f}  {PFE_fl[i]:>10.4f}  {NFE_fl[i]:>10.4f}"
+          + ("  <- deterministic" if y == 0.0 else ""))
 
 print(f"\n  Two-sided: rates down → EPE > 0 (bank gains on fixed leg).")
 print(f"             rates up   → ENE < 0 (floating leg costs more).")
@@ -287,13 +311,13 @@ print(f"             rates up   → ENE < 0 (floating leg costs more).")
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
 
 # ---- Left: Fixed-for-Fixed ----
-ax1.plot(tenor_years, EPE_ff, "b-o",  lw=2, ms=5, label="EPE")
-ax1.plot(tenor_years, ENE_ff, "r-o",  lw=2, ms=5, label="ENE")
-ax1.plot(tenor_years, PFE_ff, "b--s", lw=1.5, ms=4, label="PFE (95%)")
-ax1.plot(tenor_years, NFE_ff, "r--s", lw=1.5, ms=4, label="NFE (5%)")
+ax1.plot(plot_years, EPE_ff, "b-o",  lw=2, ms=5, label="EPE")
+ax1.plot(plot_years, ENE_ff, "r-o",  lw=2, ms=5, label="ENE")
+ax1.plot(plot_years, PFE_ff, "b--s", lw=1.5, ms=4, label="PFE (95%)")
+ax1.plot(plot_years, NFE_ff, "r--s", lw=1.5, ms=4, label="NFE (5%)")
 ax1.axhline(0, color="grey", lw=0.8)
-ax1.fill_between(tenor_years, 0, EPE_ff, alpha=0.1, color="blue")
-ax1.fill_between(tenor_years, ENE_ff, 0, alpha=0.1, color="red")
+ax1.fill_between(plot_years, 0, EPE_ff, alpha=0.1, color="blue")
+ax1.fill_between(plot_years, ENE_ff, 0, alpha=0.1, color="red")
 ax1.set_xlabel("Time (years)", fontsize=11)
 ax1.set_ylabel("Exposure (% of notional)", fontsize=11)
 ax1.set_title(
@@ -303,16 +327,16 @@ ax1.set_title(
 )
 ax1.legend(loc="best", fontsize=9)
 ax1.grid(True, alpha=0.3)
-ax1.set_xlim(0, tenor_years[-1] + 0.5)
+ax1.set_xlim(0, plot_years[-1] + 0.5)
 
 # ---- Right: Fixed-for-Floating ----
-ax2.plot(tenor_years, EPE_fl, "b-o",  lw=2, ms=5, label="EPE")
-ax2.plot(tenor_years, ENE_fl, "r-o",  lw=2, ms=5, label="ENE")
-ax2.plot(tenor_years, PFE_fl, "b--s", lw=1.5, ms=4, label="PFE (95%)")
-ax2.plot(tenor_years, NFE_fl, "r--s", lw=1.5, ms=4, label="NFE (5%)")
+ax2.plot(plot_years, EPE_fl, "b-o",  lw=2, ms=5, label="EPE")
+ax2.plot(plot_years, ENE_fl, "r-o",  lw=2, ms=5, label="ENE")
+ax2.plot(plot_years, PFE_fl, "b--s", lw=1.5, ms=4, label="PFE (95%)")
+ax2.plot(plot_years, NFE_fl, "r--s", lw=1.5, ms=4, label="NFE (5%)")
 ax2.axhline(0, color="grey", lw=0.8)
-ax2.fill_between(tenor_years, 0, EPE_fl, alpha=0.15, color="blue")
-ax2.fill_between(tenor_years, ENE_fl, 0, alpha=0.15, color="red")
+ax2.fill_between(plot_years, 0, EPE_fl, alpha=0.15, color="blue")
+ax2.fill_between(plot_years, ENE_fl, 0, alpha=0.15, color="red")
 ax2.set_xlabel("Time (years)", fontsize=11)
 ax2.set_title(
     "Fixed-for-Floating\n"
@@ -321,7 +345,7 @@ ax2.set_title(
 )
 ax2.legend(loc="best", fontsize=9)
 ax2.grid(True, alpha=0.3)
-ax2.set_xlim(0, tenor_years[-1] + 0.5)
+ax2.set_xlim(0, plot_years[-1] + 0.5)
 
 fig.suptitle(
     f"Counterparty Exposure — Par-Par Asset Swap on BTP | "
