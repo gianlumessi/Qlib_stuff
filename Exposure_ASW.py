@@ -1,32 +1,33 @@
 """
 ===============================================================
-  COUNTERPARTY EXPOSURE PROFILES — PAR-PAR ASSET SWAP
-  Fixed-for-Fixed vs Fixed-for-Floating, OIS single-curve
+  COUNTERPARTY EXPOSURE PROFILES — TWO POSITIVE-MtM SWAPS
+  OIS single-curve, cumulative random-walk simulation
 ===============================================================
 
-Two swap structures are compared, both on the same Italian BTP:
+Two swap structures are compared, both with POSITIVE inception MtM
+from the Bank's perspective:
 
-  FIXED-FOR-FIXED:
-    Bank RECEIVES: bond coupon c (fixed)
-    Bank PAYS:     K = r_s + ASW (fixed)
-    MtM = (c - K) * N * A_rem
-    Always one-sided (bank always OTM) because c < K.
+  SWAP 1 — FIX-FLOAT  (Receiver swap, above-par coupon):
+    Bank RECEIVES: r_s + 50 bps  (fixed)
+    Bank PAYS:     OIS floating
+    MtM = R * N * A_rem  -  N * (DF_fwd(obs, s_first) - DF_fwd(obs, T))
+    where R = r_s + 0.005  (struck above par → positive inception MtM)
+    Two-sided exposure driven by floating leg sensitivity.
 
-  FIXED-FOR-FLOATING:
-    Bank RECEIVES: bond coupon c (fixed)
-    Bank PAYS:     OIS forward + ASW (floating)
-    MtM = (c - ASW) * N * A_rem - N * (1 - DF_fwd(obs, T))
-    Two-sided: rate falls → bank gains (fixed > float);
-               rate rises → bank loses (fixed < float).
-
-Both use the same ASW spread in the single-curve OIS framework:
-  ASW = (c - r_s) + (N - P) / (N * A)
+  SWAP 2 — FIX-FIX  (Differential swap):
+    Bank RECEIVES: 3.50% fixed
+    Bank PAYS:     3.00% fixed
+    MtM = (c_recv - c_pay) * N * A_rem = 0.50% * N * A_rem
+    Always positive (bank always ITM). One-sided exposure.
 
 EXPOSURE SIMULATION:
-  - 10 observation dates (annual coupon dates)
-  - Parallel shift to all OIS zero rates: dz ~ N(0, sigma)
-  - sigma = 10 bps absolute normal vol
-  - 1500 Monte Carlo paths (identical shifts for both structures)
+  - 100 equally spaced observation dates from today to maturity
+  - Cumulative normally distributed parallel shifts (random walk):
+      shifts[:, 0] = 0
+      shifts[:, t] = shifts[:, t-1] + N(0, sigma)
+  - sigma = 0.10 (10 pp absolute normal vol per step)
+  - 1500 Monte Carlo paths (identical paths for both swaps)
+  - Analytical DF shifting: DF_shifted(d) = DF_base(d) * exp(-dz * t_d)
   - EPE, ENE, PFE (95th), NFE (5th)
 
 REQUIREMENTS:
@@ -47,16 +48,23 @@ COUPON_RATE      = 0.0345
 COUPON_FREQUENCY = ql.Semiannual
 BOND_MATURITY    = ql.Date(1, ql.February, 2036)
 BOND_LAST_COUPON_DATE = ql.Date(1, ql.February, 2026)
-BBG_DIRTY_PRICE  = 98.4511
 N_PCT            = 100.0
 
 OIS_TENORS = ["1W", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y"]
 OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
               0.02558, 0.0260515, 0.026589, 0.0271, 0.027626, 0.02814]
 
-N_PATHS = 1500
-SIGMA   = 0.001   # 10 bps absolute normal vol for parallel shifts
+N_PATHS   = 1500
+N_TENORS  = 100
+SIGMA     = 0.10     # 10 pp absolute normal vol per step
 np.random.seed(42)
+
+# Swap 1 parameters
+SPREAD_OVER_PAR = 0.005   # 50 bps above par swap rate
+
+# Swap 2 parameters
+C_RECV = 0.035   # Bank receives 3.50%
+C_PAY  = 0.030   # Bank pays 3.00%
 
 # ==============================================================
 # [2]  DATES & CONVENTIONS
@@ -70,7 +78,7 @@ ql.Settings.instance().evaluationDate = today
 settle = calendar.advance(today, ql.Period("2D"))
 
 # ==============================================================
-# [3]  HELPER: BUILD OIS CURVE FROM ZERO RATES
+# [3]  BUILD BASE OIS CURVE
 # ==============================================================
 def build_ois_curve(zeros):
     pillar_dates = [today] + [calendar.advance(today, ql.Period(t)) for t in OIS_TENORS]
@@ -81,6 +89,8 @@ def build_ois_curve(zeros):
     )
     curve.enableExtrapolation()
     return curve
+
+base_curve = build_ois_curve(OIS_ZEROS)
 
 # ==============================================================
 # [4]  BUILD BOND SCHEDULE AND EXTRACT COUPON DATES
@@ -94,7 +104,6 @@ schedule = ql.Schedule(
 )
 
 all_schedule_dates = list(schedule)
-
 coupon_dates = [d for d in all_schedule_dates[1:] if d > settle]
 
 all_period_starts = all_schedule_dates[:-1]
@@ -106,18 +115,8 @@ for s in all_period_starts:
         period_starts.append(s)
 
 # ==============================================================
-# [5]  COMPUTE ANNUITY, PAR SWAP RATE, AND ASW
-#
-#      A = Sigma alpha_i * DF(0, t_i)
-#      r_s = (1 - DF(T)) / A
-#      ASW = (c - r_s) + (N - P) / (N * A)
-#      K = r_s + ASW = c + (N - P) / (N * A)
-#
-#      In the single-curve OIS framework, the ASW spread is the same
-#      whether the bank pays fixed (K) or floating (OIS + ASW).
+# [5]  COMPUTE ANNUITY AND PAR SWAP RATE
 # ==============================================================
-base_curve = build_ois_curve(OIS_ZEROS)
-
 annuity = 0.0
 for s, e in zip(period_starts, coupon_dates):
     alpha = bond_dc.yearFraction(s, e)
@@ -126,144 +125,175 @@ for s, e in zip(period_starts, coupon_dates):
 
 df_T = base_curve.discount(BOND_MATURITY)
 r_s  = (1.0 - df_T) / annuity
-ASW  = (COUPON_RATE - r_s) + (N_PCT - BBG_DIRTY_PRICE) / (N_PCT * annuity)
-K    = r_s + ASW
 
-upfront = BBG_DIRTY_PRICE - N_PCT   # P - N (negative for discount bond)
+# Swap 1: Bank receives R = r_s + 50 bps
+R_SWAP1 = r_s + SPREAD_OVER_PAR
 
-# Verify inception MtM for both structures = P - N
-fix_fix_mtm0   = (COUPON_RATE - K) * N_PCT * annuity
-fix_float_mtm0 = (COUPON_RATE - ASW) * N_PCT * annuity - N_PCT * (1.0 - df_T)
+# Inception MtM computations
+# Swap 1: MtM = R*N*A - N*(DF(s_first) - DF(T))
+#   At inception the floating leg PV = N*(1 - DF(T)) when s_first = settle
+#   But we use the first remaining coupon start as s_first.
+#   Since we compute from today, DF_fwd(today, s_first) = DF(s_first)/DF(today) = DF(s_first)
+df_s_first = base_curve.discount(period_starts[0]) if period_starts[0] > today else 1.0
+mtm0_swap1 = R_SWAP1 * N_PCT * annuity - N_PCT * (df_s_first - df_T)
+
+# Swap 2: MtM = (c_recv - c_pay) * N * A_rem
+mtm0_swap2 = (C_RECV - C_PAY) * N_PCT * annuity
 
 sep = "=" * 68
 print(sep)
-print("  COUNTERPARTY EXPOSURE — FIX-FIX vs FIX-FLOAT ASSET SWAP")
+print("  COUNTERPARTY EXPOSURE — TWO POSITIVE-MtM SWAPS")
 print(sep)
 
 print(f"\n[1]  SWAP PARAMETERS AT INCEPTION")
-print(f"  Bond coupon c:           {COUPON_RATE*100:.4f}%")
 print(f"  OIS par swap rate r_s:   {r_s*100:.4f}%")
-print(f"  ASW spread:              {ASW*10000:.2f} bps")
-print(f"  Fix-fix: bank pays K:    {K*100:.4f}%")
-print(f"  Fix-float: bank pays:    OIS + {ASW*10000:.2f} bps")
 print(f"  Annuity A:               {annuity:.6f}")
 print(f"  DF(0,T):                 {df_T:.6f}")
-print(f"  Dirty price P:           {BBG_DIRTY_PRICE:.4f}%")
-print(f"  Upfront (P - N):         {upfront:.4f}%")
-print(f"  Fix-fix  MtM at t=0:     {fix_fix_mtm0:.4f}%  (should be {upfront:.4f}%)")
-print(f"  Fix-float MtM at t=0:    {fix_float_mtm0:.4f}%  (should be {upfront:.4f}%)")
+print(f"  DF(0,s_first):           {df_s_first:.6f}")
+print(f"\n  SWAP 1 — Fix-Float (Receiver)")
+print(f"    Bank receives:         {R_SWAP1*100:.4f}% fixed (r_s + 50 bps)")
+print(f"    Bank pays:             OIS floating")
+print(f"    Inception MtM:         {mtm0_swap1:.4f}% of notional (positive)")
+print(f"\n  SWAP 2 — Fix-Fix (Differential)")
+print(f"    Bank receives:         {C_RECV*100:.2f}% fixed")
+print(f"    Bank pays:             {C_PAY*100:.2f}% fixed")
+print(f"    Inception MtM:         {mtm0_swap2:.4f}% of notional (positive)")
 
 # ==============================================================
-# [6]  TENOR GRID — t=0 (deterministic) + 10 annual coupon dates
+# [6]  TENOR GRID — 100 equally spaced from today to maturity
+#      t=0 is today (deterministic), rest are simulated
 # ==============================================================
-n_tenors = 10
-step = max(1, len(coupon_dates) // n_tenors)
-sim_tenor_dates = coupon_dates[step-1::step][:n_tenors]
+maturity_serial = BOND_MATURITY.serialNumber()
+today_serial = today.serialNumber()
+total_days = maturity_serial - today_serial
 
-# Prepend today as the t=0 observation point
-tenor_dates = [today] + sim_tenor_dates
-tenor_years = [0.0] + [ois_dc.yearFraction(today, d) for d in sim_tenor_dates]
+tenor_serial = np.linspace(today_serial, maturity_serial, N_TENORS + 1, dtype=int)
+tenor_serial = np.unique(tenor_serial)
+tenor_dates = [ql.Date(int(s)) for s in tenor_serial]
+tenor_years = np.array([ois_dc.yearFraction(today, d) for d in tenor_dates])
 
-print(f"\n[2]  OBSERVATION DATES ({len(tenor_dates)} tenors)")
-for i, (d, y) in enumerate(zip(tenor_dates, tenor_years)):
-    label = "  <- deterministic (no shift)" if y == 0.0 else ""
-    print(f"    {i+1:>2}. {d}  ({y:.2f}Y){label}")
+print(f"\n[2]  TENOR GRID")
+print(f"  {len(tenor_dates)} observation dates from {today} to {BOND_MATURITY}")
+print(f"  First 5: {', '.join(str(d) for d in tenor_dates[:5])}")
+print(f"  Last 5:  {', '.join(str(d) for d in tenor_dates[-5:])}")
+print(f"  tenor_years[0] = {tenor_years[0]:.4f} (deterministic)")
+print(f"  tenor_years[-1] = {tenor_years[-1]:.4f}")
 
 # ==============================================================
-# [7]  GENERATE SHARED MONTE CARLO SHIFTS
-#      Same random paths used for both structures so the comparison
-#      isolates the structural difference, not sampling noise.
-#      Column 0 (t=0) is forced to zero — the inception MtM is a
-#      known present value, not a simulated one.
+# [7]  PRE-COMPUTE BASE DISCOUNT FACTORS AND TIME-TO-DATES
+#      For analytical shifting: DF_shifted(d) = DF_base(d) * exp(-dz * t_d)
+#      This avoids rebuilding QuantLib curves for each path.
 # ==============================================================
-shifts = np.random.normal(0.0, SIGMA, size=(N_PATHS, len(tenor_dates)))
-shifts[:, 0] = 0.0
+# All dates we need DFs for: coupon dates + maturity + tenor observation dates
+all_relevant_dates = sorted(set(
+    coupon_dates + [BOND_MATURITY] + tenor_dates + period_starts
+))
+# Filter to dates >= today
+all_relevant_dates = [d for d in all_relevant_dates if d >= today]
+
+base_dfs = {}
+date_years = {}
+for d in all_relevant_dates:
+    base_dfs[d.serialNumber()] = base_curve.discount(d)
+    date_years[d.serialNumber()] = ois_dc.yearFraction(today, d)
+
+# Pre-compute coupon period data
+coupon_data = []
+for s, e in zip(period_starts, coupon_dates):
+    alpha = bond_dc.yearFraction(s, e)
+    coupon_data.append((s.serialNumber(), e.serialNumber(), alpha))
+
+mat_serial = BOND_MATURITY.serialNumber()
+s_first_serial = period_starts[0].serialNumber() if period_starts[0] >= today else today.serialNumber()
+
+# ==============================================================
+# [8]  GENERATE CUMULATIVE RANDOM WALK SHIFTS
+#      shifts[:, 0] = 0
+#      shifts[:, t] = shifts[:, t-1] + N(0, sigma)
+#      Same paths for both swaps.
+# ==============================================================
+increments = np.random.normal(0.0, SIGMA, size=(N_PATHS, len(tenor_dates)))
+increments[:, 0] = 0.0
+shifts = np.cumsum(increments, axis=1)
 
 print(f"\n[3]  MONTE CARLO SIMULATION")
-print(f"  Paths: {N_PATHS},  Sigma: {SIGMA*10000:.0f} bps,  Tenors: {len(tenor_dates)}"
-      f" (t=0 deterministic + {len(sim_tenor_dates)} simulated)")
+print(f"  Paths: {N_PATHS}")
+print(f"  Sigma: {SIGMA:.2f} (per step)")
+print(f"  Shift type: cumulative random walk")
+print(f"  Tenors: {len(tenor_dates)} (t=0 deterministic + {len(tenor_dates)-1} simulated)")
+print(f"  Shift stats at final tenor: mean={shifts[:,-1].mean():.4f}, "
+      f"std={shifts[:,-1].std():.4f}")
 
 # ==============================================================
-# [8]  FIXED-FOR-FIXED EXPOSURE SIMULATION
+# [9]  VECTORIZED EXPOSURE SIMULATION
 #
-#      MtM = (c - K) * N * A_rem(shifted)
+#      For each observation date obs:
+#        DF_shifted(d) = DF_base(d) * exp(-dz * t_d)
+#        DF_fwd(obs, d) = DF_shifted(d) / DF_shifted(obs)
+#                       = [DF_base(d)/DF_base(obs)] * exp(-dz*(t_d - t_obs))
 #
-#      Since c < K, MtM is always negative regardless of shift.
-#      The annuity magnitude changes with rates but the sign cannot.
+#      SWAP 1 (Fix-Float):
+#        MtM = R * N * A_rem - N * (DF_fwd(obs, s_first_rem) - DF_fwd(obs, T))
+#        where s_first_rem is the start of the first remaining coupon period
+#
+#      SWAP 2 (Fix-Fix):
+#        MtM = (c_recv - c_pay) * N * A_rem
 # ==============================================================
-mtm_fixfix = np.zeros((N_PATHS, len(tenor_dates)))
-coupon_diff_ff = COUPON_RATE - K
+mtm_swap1 = np.zeros((N_PATHS, len(tenor_dates)))
+mtm_swap2 = np.zeros((N_PATHS, len(tenor_dates)))
 
-for t_idx, obs_date in enumerate(tenor_dates):
-    rem_coupons = [(s, e) for s, e in zip(period_starts, coupon_dates) if e > obs_date]
+coupon_diff_swap2 = C_RECV - C_PAY
+
+for t_idx in range(len(tenor_dates)):
+    obs_date = tenor_dates[t_idx]
+    obs_serial = obs_date.serialNumber()
+    dz = shifts[:, t_idx]  # shape (N_PATHS,)
+
+    obs_df_base = base_dfs[obs_serial]
+    obs_t = date_years[obs_serial]
+
+    # Remaining coupon periods after obs_date
+    rem_coupons = [(s_ser, e_ser, alpha) for s_ser, e_ser, alpha in coupon_data
+                   if e_ser > obs_serial]
+
     if not rem_coupons:
         continue
 
-    for path in range(N_PATHS):
-        shifted_curve = build_ois_curve([z + shifts[path, t_idx] for z in OIS_ZEROS])
-        df_obs = shifted_curve.discount(obs_date)
+    # Compute remaining annuity (vectorized across paths)
+    # A_rem = sum_i alpha_i * DF_fwd(obs, e_i)
+    # DF_fwd(obs, e_i) = [DF_base(e_i)/DF_base(obs)] * exp(-dz * (t_e_i - t_obs))
+    rem_annuity = np.zeros(N_PATHS)
+    for s_ser, e_ser, alpha in rem_coupons:
+        df_base_e = base_dfs[e_ser]
+        t_e = date_years[e_ser]
+        df_fwd_e = (df_base_e / obs_df_base) * np.exp(-dz * (t_e - obs_t))
+        rem_annuity += alpha * df_fwd_e
 
-        rem_annuity = sum(
-            bond_dc.yearFraction(s, e) * shifted_curve.discount(e) / df_obs
-            for s, e in rem_coupons
-        )
-        mtm_fixfix[path, t_idx] = coupon_diff_ff * N_PCT * rem_annuity
+    # Swap 2: MtM = (c_recv - c_pay) * N * A_rem
+    mtm_swap2[:, t_idx] = coupon_diff_swap2 * N_PCT * rem_annuity
 
-print("  Fix-fix simulation complete.")
+    # Swap 1: MtM = R * N * A_rem - N * (DF_fwd(obs, s_first_rem) - DF_fwd(obs, T))
+    # s_first_rem = start of first remaining coupon period
+    s_first_rem_serial = rem_coupons[0][0]
+    # Clamp s_first_rem to obs_date if it's before obs_date
+    if s_first_rem_serial <= obs_serial:
+        df_fwd_s_first = np.ones(N_PATHS)
+    else:
+        df_base_sf = base_dfs[s_first_rem_serial]
+        t_sf = date_years[s_first_rem_serial]
+        df_fwd_s_first = (df_base_sf / obs_df_base) * np.exp(-dz * (t_sf - obs_t))
 
-# ==============================================================
-# [9]  FIXED-FOR-FLOATING EXPOSURE SIMULATION
-#
-#      MtM = (c - ASW) * N * A_rem  -  N * (1 - DF_fwd(obs, T))
-#
-#      First term:  PV of fixed coupons net of spread, discounted
-#      Second term: PV of OIS floating coupons (telescopes to 1-DF)
-#
-#      When rates FALL:
-#        A_rem increases, DF_fwd(T) increases → (1-DF_fwd) shrinks
-#        → fixed leg gains value, floating leg pays less → MtM rises
-#
-#      When rates RISE:
-#        A_rem decreases, DF_fwd(T) decreases → (1-DF_fwd) grows
-#        → fixed leg loses value, floating leg pays more → MtM falls
-#
-#      This creates two-sided exposure (classic receiver swap profile).
-# ==============================================================
-mtm_fixflt = np.zeros((N_PATHS, len(tenor_dates)))
-c_minus_asw = COUPON_RATE - ASW
+    df_base_mat = base_dfs[mat_serial]
+    t_mat = date_years[mat_serial]
+    df_fwd_mat = (df_base_mat / obs_df_base) * np.exp(-dz * (t_mat - obs_t))
 
-for t_idx, obs_date in enumerate(tenor_dates):
-    rem_coupons = [(s, e) for s, e in zip(period_starts, coupon_dates) if e > obs_date]
-    if not rem_coupons:
-        continue
+    mtm_swap1[:, t_idx] = R_SWAP1 * N_PCT * rem_annuity \
+                           - N_PCT * (df_fwd_s_first - df_fwd_mat)
 
-    for path in range(N_PATHS):
-        shifted_curve = build_ois_curve([z + shifts[path, t_idx] for z in OIS_ZEROS])
-        df_obs = shifted_curve.discount(obs_date)
-
-        # Remaining annuity (forward DFs from obs_date)
-        rem_annuity = sum(
-            bond_dc.yearFraction(s, e) * shifted_curve.discount(e) / df_obs
-            for s, e in rem_coupons
-        )
-
-        # Forward DF from obs_date to maturity
-        df_fwd_T = shifted_curve.discount(BOND_MATURITY) / df_obs
-
-        # MtM = PV(fixed received) - PV(floating paid)
-        # PV(fixed) = c * N * A_rem
-        # PV(float) = N * (1 - DF_fwd_T) + ASW * N * A_rem
-        # MtM = (c - ASW) * N * A_rem - N * (1 - DF_fwd_T)
-        mtm_fixflt[path, t_idx] = c_minus_asw * N_PCT * rem_annuity \
-                                  - N_PCT * (1.0 - df_fwd_T)
-
-print("  Fix-float simulation complete.")
+print("  Simulation complete.")
 
 # ==============================================================
-# [10]  EXPOSURE METRICS FOR BOTH STRUCTURES
-#
-#       Column 0 (t=0) has shift=0 for all paths, so EPE/ENE/PFE/NFE
-#       at t=0 all collapse to the single deterministic inception MtM.
+# [10]  EXPOSURE METRICS
 # ==============================================================
 def compute_exposure_metrics(mtm):
     epe = np.maximum(mtm, 0.0).mean(axis=0)
@@ -272,73 +302,84 @@ def compute_exposure_metrics(mtm):
     nfe = np.percentile(mtm, 5, axis=0)
     return epe, ene, pfe, nfe
 
-EPE_ff, ENE_ff, PFE_ff, NFE_ff = compute_exposure_metrics(mtm_fixfix)
-EPE_fl, ENE_fl, PFE_fl, NFE_fl = compute_exposure_metrics(mtm_fixflt)
+EPE_s1, ENE_s1, PFE_s1, NFE_s1 = compute_exposure_metrics(mtm_swap1)
+EPE_s2, ENE_s2, PFE_s2, NFE_s2 = compute_exposure_metrics(mtm_swap2)
 
-print(f"\n[4a] FIX-FIX EXPOSURE (% of notional, bank perspective)")
+print(f"\n[4a] SWAP 1 — FIX-FLOAT EXPOSURE (% of notional, bank perspective)")
+# Print a subset (every ~10th point)
+step_print = max(1, len(tenor_dates) // 10)
 print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
 print(f"  {'-'*50}")
-for i, y in enumerate(tenor_years):
-    print(f"  {y:>7.2f}Y  {EPE_ff[i]:>8.4f}  {ENE_ff[i]:>8.4f}  {PFE_ff[i]:>10.4f}  {NFE_ff[i]:>10.4f}"
-          + ("  <- deterministic" if y == 0.0 else ""))
+for i in range(0, len(tenor_dates), step_print):
+    label = "  <- deterministic" if i == 0 else ""
+    print(f"  {tenor_years[i]:>7.2f}Y  {EPE_s1[i]:>8.4f}  {ENE_s1[i]:>8.4f}  "
+          f"{PFE_s1[i]:>10.4f}  {NFE_s1[i]:>10.4f}{label}")
+# Always print last point
+if (len(tenor_dates) - 1) % step_print != 0:
+    i = len(tenor_dates) - 1
+    print(f"  {tenor_years[i]:>7.2f}Y  {EPE_s1[i]:>8.4f}  {ENE_s1[i]:>8.4f}  "
+          f"{PFE_s1[i]:>10.4f}  {NFE_s1[i]:>10.4f}")
 
-print(f"\n  EPE ~ 0: c < K so bank is always OTM (one-sided exposure).")
+print(f"\n  Inception MtM = {mtm0_swap1:.4f}%. Two-sided: rate moves create both upside and downside.")
 
-print(f"\n[4b] FIX-FLOAT EXPOSURE (% of notional, bank perspective)")
+print(f"\n[4b] SWAP 2 — FIX-FIX EXPOSURE (% of notional, bank perspective)")
 print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
 print(f"  {'-'*50}")
-for i, y in enumerate(tenor_years):
-    print(f"  {y:>7.2f}Y  {EPE_fl[i]:>8.4f}  {ENE_fl[i]:>8.4f}  {PFE_fl[i]:>10.4f}  {NFE_fl[i]:>10.4f}"
-          + ("  <- deterministic" if y == 0.0 else ""))
+for i in range(0, len(tenor_dates), step_print):
+    label = "  <- deterministic" if i == 0 else ""
+    print(f"  {tenor_years[i]:>7.2f}Y  {EPE_s2[i]:>8.4f}  {ENE_s2[i]:>8.4f}  "
+          f"{PFE_s2[i]:>10.4f}  {NFE_s2[i]:>10.4f}{label}")
+if (len(tenor_dates) - 1) % step_print != 0:
+    i = len(tenor_dates) - 1
+    print(f"  {tenor_years[i]:>7.2f}Y  {EPE_s2[i]:>8.4f}  {ENE_s2[i]:>8.4f}  "
+          f"{PFE_s2[i]:>10.4f}  {NFE_s2[i]:>10.4f}")
 
-print(f"\n  Two-sided: rates down → EPE > 0 (bank gains on fixed leg).")
-print(f"             rates up   → ENE < 0 (floating leg costs more).")
+print(f"\n  Inception MtM = {mtm0_swap2:.4f}%. Always positive: bank receives more than it pays.")
 
 # ==============================================================
 # [11]  SIDE-BY-SIDE PLOT
+#       Each subplot has its own y-scale (independent axes) so the
+#       exposure profiles are visible despite different magnitudes.
+#       Y-limits are set from the PFE/NFE envelope with 20% padding.
 # ==============================================================
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-# ---- Left: Fixed-for-Fixed ----
-for p in range(N_PATHS):
-    ax1.plot(tenor_years, mtm_fixfix[p, :], color="grey", alpha=0.05, lw=0.5)
-ax1.plot(tenor_years, EPE_ff, "b-o",  lw=2, ms=5, label="EPE", zorder=5)
-ax1.plot(tenor_years, ENE_ff, "r-o",  lw=2, ms=5, label="ENE", zorder=5)
-ax1.plot(tenor_years, PFE_ff, "b--s", lw=1.5, ms=4, label="PFE (95%)", zorder=5)
-ax1.plot(tenor_years, NFE_ff, "r--s", lw=1.5, ms=4, label="NFE (5%)", zorder=5)
-ax1.axhline(0, color="grey", lw=0.8)
-ax1.set_xlabel("Time (years)", fontsize=11)
+def plot_exposure(ax, tenor_yrs, mtm, epe, ene, pfe, nfe, title):
+    ymin = min(nfe.min(), ene.min())
+    ymax = max(pfe.max(), epe.max())
+    pad = 0.2 * max(abs(ymax), abs(ymin), 1.0)
+    ylim_lo, ylim_hi = ymin - pad, ymax + pad
+
+    for p in range(mtm.shape[0]):
+        ax.plot(tenor_yrs, mtm[p, :], color="grey", alpha=0.05, lw=0.3)
+    ax.plot(tenor_yrs, epe, "b-",  lw=2, label="EPE", zorder=5)
+    ax.plot(tenor_yrs, ene, "r-",  lw=2, label="ENE", zorder=5)
+    ax.plot(tenor_yrs, pfe, "b--", lw=1.5, label="PFE (95%)", zorder=5)
+    ax.plot(tenor_yrs, nfe, "r--", lw=1.5, label="NFE (5%)", zorder=5)
+    ax.axhline(0, color="black", lw=0.8)
+    ax.set_ylim(ylim_lo, ylim_hi)
+    ax.set_xlabel("Time (years)", fontsize=11)
+    ax.set_title(title, fontsize=11)
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+plot_exposure(
+    ax1, tenor_years, mtm_swap1, EPE_s1, ENE_s1, PFE_s1, NFE_s1,
+    "SWAP 1 — Fix-Float (Receiver)\n"
+    f"Bank receives {R_SWAP1*100:.2f}% fixed, pays OIS floating",
+)
 ax1.set_ylabel("Exposure (% of notional)", fontsize=11)
-ax1.set_title(
-    "Fixed-for-Fixed\n"
-    f"Bank receives {COUPON_RATE*100:.2f}%, pays {K*100:.2f}% fixed",
-    fontsize=11,
-)
-ax1.legend(loc="best", fontsize=9)
-ax1.grid(True, alpha=0.3)
-ax1.set_xlim(0, tenor_years[-1] + 0.5)
 
-# ---- Right: Fixed-for-Floating ----
-for p in range(N_PATHS):
-    ax2.plot(tenor_years, mtm_fixflt[p, :], color="grey", alpha=0.05, lw=0.5)
-ax2.plot(tenor_years, EPE_fl, "b-o",  lw=2, ms=5, label="EPE", zorder=5)
-ax2.plot(tenor_years, ENE_fl, "r-o",  lw=2, ms=5, label="ENE", zorder=5)
-ax2.plot(tenor_years, PFE_fl, "b--s", lw=1.5, ms=4, label="PFE (95%)", zorder=5)
-ax2.plot(tenor_years, NFE_fl, "r--s", lw=1.5, ms=4, label="NFE (5%)", zorder=5)
-ax2.axhline(0, color="grey", lw=0.8)
-ax2.set_xlabel("Time (years)", fontsize=11)
-ax2.set_title(
-    "Fixed-for-Floating\n"
-    f"Bank receives {COUPON_RATE*100:.2f}% fixed, pays OIS + {ASW*10000:.0f}bps",
-    fontsize=11,
+plot_exposure(
+    ax2, tenor_years, mtm_swap2, EPE_s2, ENE_s2, PFE_s2, NFE_s2,
+    "SWAP 2 — Fix-Fix (Differential)\n"
+    f"Bank receives {C_RECV*100:.2f}%, pays {C_PAY*100:.2f}% fixed",
 )
-ax2.legend(loc="best", fontsize=9)
-ax2.grid(True, alpha=0.3)
-ax2.set_xlim(0, tenor_years[-1] + 0.5)
 
 fig.suptitle(
-    f"Counterparty Exposure — Par-Par Asset Swap on BTP | "
-    f"{N_PATHS} paths | $\\sigma$ = {SIGMA*10000:.0f} bps",
+    f"Counterparty Exposure — Positive Inception MtM | "
+    f"{N_PATHS} paths | {N_TENORS} tenors | "
+    f"$\\sigma$ = {SIGMA:.2f} (cumulative random walk)",
     fontsize=12, fontweight="bold", y=1.02,
 )
 plt.tight_layout()
