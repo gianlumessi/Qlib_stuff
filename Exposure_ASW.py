@@ -1,36 +1,31 @@
 """
 ===============================================================
-  COUNTERPARTY EXPOSURE — PAR-PAR ASSET SWAP
-  How bond price shifts the day-1 MtM and exposure profiles
+  COUNTERPARTY EXPOSURE PROFILES — FOUR SWAP STRUCTURES
+  Par-par ASW (3 bond prices) + Fix-for-Fix differential swap
 ===============================================================
 
-Three par-par asset swap scenarios on the same BTP (3.45% semi-annual),
-differing ONLY by the bond's dirty price:
+STRUCTURES 1-3:  Par-par asset swap on BTP 3.45%, differing by
+                 bond dirty price (P = 100, 90, 110).
 
-  Scenario A:  P = 100  (par)       → inception swap MtM ~  0
-  Scenario B:  P =  90  (discount)  → inception swap MtM ~ +10
-  Scenario C:  P = 110  (premium)   → inception swap MtM ~ -10
-
-ASSET SWAP STRUCTURE (Bank's perspective):
-  The bank buys the bond at P and enters a swap that converts the
-  bond's fixed cash flows into a synthetic floating-rate asset.
-  Through the swap:
+  The bank converts the bond into a synthetic FRN via a swap:
     Bank passes:   bond fixed coupons (c = 3.45%) + principal N
     Bank receives: ESTR floating + ASW spread
 
   ASW = (c - r_s) + (N - P) / (N * A)
+  Swap MtM = N*(1 - DF_fwd(obs,T)) + (ASW - c)*N*A_rem
+  Inception MtM = 100 - P.
 
-  The swap MtM from the Bank's perspective:
-    MtM = N * (1 - DF_fwd(obs, T)) + (ASW - c) * N * A_rem
-  At inception: MtM = 100 - P  (verified below).
-
-  Check: swap MtM + bond price = 100  (par package).
+STRUCTURE 4:  Fix-for-fix differential swap
+    Bank RECEIVES: 3.50% fixed
+    Bank PAYS:     3.00% fixed
+    MtM = (c_recv - c_pay) * N * A_rem = 0.50% * N * A_rem
+    Always positive (bank always ITM).  One-sided exposure.
 
 EXPOSURE SIMULATION:
   - Cumulative parallel ESTR shifts (random walk):
       shifts[:, 0] = 0,  shifts[:, t] = shifts[:, t-1] + N(0, sigma)
   - Analytical DF shifting: DF_shifted(d) = DF_base(d) * exp(-dz * t_d)
-  - Same 1500 MC paths reused for all three scenarios
+  - Same 1500 MC paths reused across all four structures
   - EPE, ENE, PFE (95th), NFE (5th)
 
 REQUIREMENTS:
@@ -61,12 +56,16 @@ N_PATHS = 1500
 SIGMA   = 0.010
 np.random.seed(42)
 
-# Three bond price scenarios
+# Three bond price scenarios for the par-par ASW
 SCENARIOS = [
     ("A (par)",      100.0),
     ("B (discount)",  90.0),
     ("C (premium)",  110.0),
 ]
+
+# Fix-for-fix differential swap parameters
+C_RECV = 0.035   # Bank receives 3.50%
+C_PAY  = 0.030   # Bank pays 3.00%
 
 # ==============================================================
 # [2]  DATES & CONVENTIONS
@@ -270,10 +269,28 @@ for label, P, asw, mtm0 in scenario_data:
     mtm = float_term + spread_diff * N_PCT * arr_A_rem
     mtm_all[label] = mtm
 
-print("  MtM computed for all three scenarios.")
+print("  MtM computed for all three ASW scenarios.")
 
 # ==============================================================
-# [12]  EXPOSURE METRICS
+# [12]  FIX-FOR-FIX DIFFERENTIAL SWAP
+#
+#       MtM = (c_recv - c_pay) * N * A_rem
+#       Always positive since c_recv > c_pay.
+#       Uses the same pre-computed arr_A_rem (same bond schedule).
+# ==============================================================
+coupon_diff_ff = C_RECV - C_PAY
+mtm_fixfix     = coupon_diff_ff * N_PCT * arr_A_rem
+mtm0_fixfix    = coupon_diff_ff * N_PCT * annuity
+
+mtm_all["Fix-Fix"] = mtm_fixfix
+
+print(f"\n[5b] FIX-FOR-FIX DIFFERENTIAL SWAP")
+print(f"  Bank receives:  {C_RECV*100:.2f}% fixed")
+print(f"  Bank pays:      {C_PAY*100:.2f}% fixed")
+print(f"  Inception MtM:  {mtm0_fixfix:.4f}% of notional (always positive)")
+
+# ==============================================================
+# [13]  EXPOSURE METRICS — ALL FOUR STRUCTURES
 # ==============================================================
 def compute_exposure_metrics(mtm):
     epe = np.maximum(mtm, 0.0).mean(axis=0)
@@ -285,11 +302,13 @@ def compute_exposure_metrics(mtm):
 metrics = {}
 for label, P, asw, mtm0 in scenario_data:
     metrics[label] = compute_exposure_metrics(mtm_all[label])
+metrics["Fix-Fix"] = compute_exposure_metrics(mtm_fixfix)
 
 step_print = max(1, len(tenor_dates) // 10)
+
 for label, P, asw, mtm0 in scenario_data:
     epe, ene, pfe, nfe = metrics[label]
-    print(f"\n[5]  {label.upper()}  (P = {P:.0f}, ASW = {asw*10000:.1f} bps, MtM_0 = {mtm0:+.2f})")
+    print(f"\n[6]  {label.upper()}  (P = {P:.0f}, ASW = {asw*10000:.1f} bps, MtM_0 = {mtm0:+.2f})")
     print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
     print(f"  {'-'*50}")
     for i in range(0, len(tenor_dates), step_print):
@@ -301,41 +320,61 @@ for label, P, asw, mtm0 in scenario_data:
         print(f"  {tenor_years[i]:>7.2f}Y  {epe[i]:>8.4f}  {ene[i]:>8.4f}  "
               f"{pfe[i]:>10.4f}  {nfe[i]:>10.4f}")
 
-# ==============================================================
-# [13]  THREE-PANEL PLOT — SHARED Y-AXIS
-# ==============================================================
-fig, axes = plt.subplots(1, 3, figsize=(20, 6), sharey=True)
+epe_ff, ene_ff, pfe_ff, nfe_ff = metrics["Fix-Fix"]
+print(f"\n[6]  FIX-FOR-FIX  (recv {C_RECV*100:.2f}%, pay {C_PAY*100:.2f}%, MtM_0 = {mtm0_fixfix:+.2f})")
+print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
+print(f"  {'-'*50}")
+for i in range(0, len(tenor_dates), step_print):
+    det = "  <- det" if i == 0 else ""
+    print(f"  {tenor_years[i]:>7.2f}Y  {epe_ff[i]:>8.4f}  {ene_ff[i]:>8.4f}  "
+          f"{pfe_ff[i]:>10.4f}  {nfe_ff[i]:>10.4f}{det}")
+if (len(tenor_dates) - 1) % step_print != 0:
+    i = len(tenor_dates) - 1
+    print(f"  {tenor_years[i]:>7.2f}Y  {epe_ff[i]:>8.4f}  {ene_ff[i]:>8.4f}  "
+          f"{pfe_ff[i]:>10.4f}  {nfe_ff[i]:>10.4f}")
+print(f"\n  Always positive: bank receives more than it pays.")
 
-for idx, (label, P, asw, mtm0) in enumerate(scenario_data):
-    ax = axes[idx]
-    mtm = mtm_all[label]
-    epe, ene, pfe, nfe = metrics[label]
-
-    for p in range(N_PATHS):
-        ax.plot(tenor_years, mtm[p, :], color="grey", alpha=0.05, lw=0.3)
-    ax.plot(tenor_years, epe, "b-",  lw=2, label="EPE", zorder=5)
-    ax.plot(tenor_years, ene, "r-",  lw=2, label="ENE", zorder=5)
-    ax.plot(tenor_years, pfe, "b--", lw=1.5, label="PFE (95%)", zorder=5)
-    ax.plot(tenor_years, nfe, "r--", lw=1.5, label="NFE (5%)", zorder=5)
+# ==============================================================
+# [14]  FOUR INDIVIDUAL PLOTS — one per structure
+# ==============================================================
+def save_exposure_plot(filename, tenor_yrs, mtm, epe, ene, pfe, nfe, title, suptitle):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for p in range(mtm.shape[0]):
+        ax.plot(tenor_yrs, mtm[p, :], color="grey", alpha=0.05, lw=0.3)
+    ax.plot(tenor_yrs, epe, "b-",  lw=2, label="EPE", zorder=5)
+    ax.plot(tenor_yrs, ene, "r-",  lw=2, label="ENE", zorder=5)
+    ax.plot(tenor_yrs, pfe, "b--", lw=1.5, label="PFE (95%)", zorder=5)
+    ax.plot(tenor_yrs, nfe, "r--", lw=1.5, label="NFE (5%)", zorder=5)
     ax.axhline(0, color="black", lw=0.8)
-    ax.set_xlabel("Time (years)", fontsize=11)
-    ax.set_title(
-        f"{label}\n"
-        f"P = {P:.0f}, ASW = {asw*10000:.0f} bps, MtM$_0$ = {mtm0:+.1f}",
-        fontsize=11,
-    )
-    ax.legend(loc="best", fontsize=8)
+    ax.set_xlabel("Time (years)", fontsize=12)
+    ax.set_ylabel("Swap MtM (% of notional)", fontsize=12)
+    ax.set_title(title, fontsize=12)
+    ax.legend(loc="best", fontsize=10)
     ax.grid(True, alpha=0.3)
+    fig.suptitle(suptitle, fontsize=13, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Plot saved to {filename}")
 
-axes[0].set_ylabel("Swap MtM (% of notional)", fontsize=11)
+common_sup = f"{N_PATHS} paths | $\\sigma$ = {SIGMA:.3f} | cumulative random walk"
 
-fig.suptitle(
-    f"Par-Par Asset Swap Exposure — Bond Price Sensitivity | "
-    f"c = {COUPON_RATE*100:.2f}% | "
-    f"{N_PATHS} paths | $\\sigma$ = {SIGMA:.3f}",
-    fontsize=12, fontweight="bold", y=1.02,
+for label, P, asw, mtm0 in scenario_data:
+    epe, ene, pfe, nfe = metrics[label]
+    tag = label.split("(")[1].rstrip(")")
+    fname = f"plots/exposure_asw_{tag}.png"
+    save_exposure_plot(
+        fname, tenor_years, mtm_all[label], epe, ene, pfe, nfe,
+        f"P = {P:.0f},  ASW = {asw*10000:.0f} bps,  MtM$_0$ = {mtm0:+.1f}",
+        f"Par-Par Asset Swap — {label} | {common_sup}",
+    )
+
+epe_ff, ene_ff, pfe_ff, nfe_ff = metrics["Fix-Fix"]
+save_exposure_plot(
+    "plots/exposure_fixfix.png", tenor_years, mtm_fixfix, epe_ff, ene_ff, pfe_ff, nfe_ff,
+    f"Bank receives {C_RECV*100:.2f}% fixed, pays {C_PAY*100:.2f}% fixed\n"
+    f"MtM$_0$ = {mtm0_fixfix:+.2f}% — always positive (one-sided)",
+    f"Fix-for-Fix Differential Swap | {common_sup}",
 )
-plt.tight_layout()
-plt.savefig("plots/exposure_asw.png", dpi=150, bbox_inches="tight")
-print(f"\n  Plot saved to plots/exposure_asw.png")
+
 print(sep)
