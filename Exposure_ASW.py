@@ -20,8 +20,11 @@ STRUCTURE 4:  Fix-for-fix differential swap
     Bank PAYS:     3.00% fixed
     MtM = (c_recv - c_pay) * N * A_rem = 0.50% * N * A_rem
     Always positive (bank always ITM).  One-sided exposure.
+    Exhibits sawtooth profile: MtM steps down at each semi-annual
+    coupon date as the bank receives a net coupon payment.
 
 EXPOSURE SIMULATION:
+  - 100 equally spaced observation dates from today to maturity
   - Cumulative parallel ESTR shifts (random walk):
       shifts[:, 0] = 0,  shifts[:, t] = shifts[:, t-1] + N(0, sigma)
   - Analytical DF shifting: DF_shifted(d) = DF_base(d) * exp(-dz * t_d)
@@ -52,8 +55,9 @@ OIS_TENORS = ["1W", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y"]
 OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
               0.02558, 0.0260515, 0.026589, 0.0271, 0.027626, 0.02814]
 
-N_PATHS = 1500
-SIGMA   = 0.010
+N_PATHS  = 1500
+N_TENORS = 100
+SIGMA    = 0.010
 np.random.seed(42)
 
 # Three bond price scenarios for the par-par ASW
@@ -129,22 +133,10 @@ r_s  = (1.0 - df_T) / annuity
 
 # ==============================================================
 # [6]  ASW SPREAD AND INCEPTION MtM FOR EACH SCENARIO
-#
-#      ASW = (c - r_s) + (N - P) / (N * A)
-#
-#      Swap MtM at inception (from bank's perspective):
-#        MtM = N*(1 - DF_T) + (ASW - c)*N*A
-#            = N*(1 - DF_T) + [-(1 - DF_T)/A + (N - P)/(N*A) - c + c]*N*A  ... nah
-#            = N*(1 - DF_T) - r_s*N*A + (N - P)/A * A
-#            = N*(1 - DF_T) - N*(1 - DF_T) + (N - P)
-#            = N - P = 100 - P
-#
-#      Check: swap_MtM + P = 100  ✓
 # ==============================================================
 sep = "=" * 68
 print(sep)
-print("  COUNTERPARTY EXPOSURE — PAR-PAR ASSET SWAP")
-print("  Bond price sensitivity study")
+print("  COUNTERPARTY EXPOSURE — FOUR SWAP STRUCTURES")
 print(sep)
 
 print(f"\n[1]  COMMON PARAMETERS")
@@ -166,19 +158,24 @@ for label, P in SCENARIOS:
     scenario_data.append((label, P, asw, mtm0))
 
 # ==============================================================
-# [7]  TENOR GRID — t=0 (today) + 10 annual observation dates
+# [7]  TENOR GRID — 100 equally spaced from today to maturity
+#
+#      Dense grid is essential for the fix-for-fix sawtooth:
+#      observation dates fall between semi-annual coupon dates,
+#      so A_rem steps down visibly at each coupon payment.
 # ==============================================================
-n_tenors = 10
-step = max(1, len(coupon_dates) // n_tenors)
-sim_tenor_dates = coupon_dates[step-1::step][:n_tenors]
+maturity_serial = BOND_MATURITY.serialNumber()
+today_serial = today.serialNumber()
 
-tenor_dates = [today] + sim_tenor_dates
+tenor_serial = np.linspace(today_serial, maturity_serial, N_TENORS + 1, dtype=int)
+tenor_serial = np.unique(tenor_serial)
+tenor_dates = [ql.Date(int(s)) for s in tenor_serial]
 tenor_years = np.array([ois_dc.yearFraction(today, d) for d in tenor_dates])
 
-print(f"\n[3]  OBSERVATION DATES ({len(tenor_dates)} tenors)")
-for i, (d, y) in enumerate(zip(tenor_dates, tenor_years)):
-    label = "  <- deterministic (shift = 0)" if y == 0.0 else ""
-    print(f"    {i+1:>2}. {d}  ({y:.2f}Y){label}")
+print(f"\n[3]  TENOR GRID")
+print(f"  {len(tenor_dates)} observation dates from {today} to {BOND_MATURITY}")
+print(f"  First 5: {', '.join(str(d) for d in tenor_dates[:5])}")
+print(f"  Last 5:  {', '.join(str(d) for d in tenor_dates[-5:])}")
 
 # ==============================================================
 # [8]  PRE-COMPUTE BASE DFs AND COUPON PERIOD DATA
@@ -205,7 +202,7 @@ mat_serial = BOND_MATURITY.serialNumber()
 # [9]  GENERATE CUMULATIVE RANDOM WALK SHIFTS
 #      shifts[:, 0] = 0
 #      shifts[:, t] = shifts[:, t-1] + N(0, sigma)
-#      Same paths reused for all three scenarios.
+#      Same paths reused across all four structures.
 # ==============================================================
 increments = np.random.normal(0.0, SIGMA, size=(N_PATHS, len(tenor_dates)))
 increments[:, 0] = 0.0
@@ -222,9 +219,10 @@ print(f"  Shift stats at final tenor: mean={shifts[:,-1].mean():.4f}, "
 #       These are scenario-independent. The only scenario-specific
 #       quantity is (ASW - c), which is a scalar.
 #
-#       MtM(obs) = N*(1 - DF_fwd_T) + (ASW - c)*N*A_rem
+#       ASW scenarios: MtM = N*(1 - DF_fwd_T) + (ASW - c)*N*A_rem
+#       Fix-fix:       MtM = (c_recv - c_pay) * N * A_rem
 # ==============================================================
-arr_A_rem   = np.zeros((N_PATHS, len(tenor_dates)))
+arr_A_rem    = np.zeros((N_PATHS, len(tenor_dates)))
 arr_df_fwd_T = np.ones((N_PATHS, len(tenor_dates)))
 
 for t_idx in range(len(tenor_dates)):
@@ -257,17 +255,14 @@ for t_idx in range(len(tenor_dates)):
 print("  Pre-computation of A_rem and DF_fwd_T complete.")
 
 # ==============================================================
-# [11]  COMPUTE MtM FOR EACH SCENARIO
-#
-#       MtM = N*(1 - DF_fwd_T) + (ASW - c)*N*A_rem
+# [11]  COMPUTE MtM FOR EACH ASW SCENARIO
 # ==============================================================
-float_term = N_PCT * (1.0 - arr_df_fwd_T)   # same for all scenarios
+float_term = N_PCT * (1.0 - arr_df_fwd_T)
 
 mtm_all = {}
 for label, P, asw, mtm0 in scenario_data:
-    spread_diff = asw - COUPON_RATE    # (ASW - c), negative for all scenarios here
-    mtm = float_term + spread_diff * N_PCT * arr_A_rem
-    mtm_all[label] = mtm
+    spread_diff = asw - COUPON_RATE
+    mtm_all[label] = float_term + spread_diff * N_PCT * arr_A_rem
 
 print("  MtM computed for all three ASW scenarios.")
 
@@ -276,7 +271,9 @@ print("  MtM computed for all three ASW scenarios.")
 #
 #       MtM = (c_recv - c_pay) * N * A_rem
 #       Always positive since c_recv > c_pay.
-#       Uses the same pre-computed arr_A_rem (same bond schedule).
+#       Sawtooth: A_rem steps down at each semi-annual coupon date
+#       as the bank receives a net coupon payment of
+#       (c_recv - c_pay) * alpha_i * N ≈ 0.25% of notional.
 # ==============================================================
 coupon_diff_ff = C_RECV - C_PAY
 mtm_fixfix     = coupon_diff_ff * N_PCT * arr_A_rem
@@ -284,7 +281,7 @@ mtm0_fixfix    = coupon_diff_ff * N_PCT * annuity
 
 mtm_all["Fix-Fix"] = mtm_fixfix
 
-print(f"\n[5b] FIX-FOR-FIX DIFFERENTIAL SWAP")
+print(f"\n[5]  FIX-FOR-FIX DIFFERENTIAL SWAP")
 print(f"  Bank receives:  {C_RECV*100:.2f}% fixed")
 print(f"  Bank pays:      {C_PAY*100:.2f}% fixed")
 print(f"  Inception MtM:  {mtm0_fixfix:.4f}% of notional (always positive)")
@@ -335,7 +332,66 @@ if (len(tenor_dates) - 1) % step_print != 0:
 print(f"\n  Always positive: bank receives more than it pays.")
 
 # ==============================================================
-# [14]  FOUR INDIVIDUAL PLOTS — one per structure
+# [14]  SYMMETRY DIAGNOSTIC — par ASW scenario
+#
+#       With a normal (additive) shift model and moderate sigma,
+#       the MtM formula is approximately linear in the shift dz,
+#       so the distribution is nearly symmetric around inception.
+#       Asymmetry arises from the exp(-dz*t) convexity (Jensen's
+#       inequality): large negative shifts inflate DFs exponentially
+#       while positive shifts compress them toward zero.
+#       With 100 steps and sigma=0.010, the cumulative shift std
+#       at ~5Y is ~0.07 (7%), enough for visible convexity.
+# ==============================================================
+mtm_par = mtm_all["A (par)"]
+mid_idx = len(tenor_dates) // 2
+mtm_mid = mtm_par[:, mid_idx]
+skew_mid = float(np.mean(((mtm_mid - mtm_mid.mean()) / mtm_mid.std()) ** 3))
+epe_mid, ene_mid = metrics["A (par)"][0][mid_idx], metrics["A (par)"][1][mid_idx]
+
+print(f"\n[7]  EPE / ENE SYMMETRY DIAGNOSTIC  (par scenario, t = {tenor_years[mid_idx]:.1f}Y)")
+print(f"  EPE:                {epe_mid:>8.4f}")
+print(f"  |ENE|:              {abs(ene_mid):>8.4f}")
+print(f"  EPE / |ENE|:        {epe_mid / abs(ene_mid):>8.4f}  (1.0 = perfect symmetry)")
+print(f"  MtM skewness:       {skew_mid:>8.4f}  (0 = symmetric)")
+print(f"  Shift std at t:     {shifts[:, mid_idx].std():>8.4f}  ({shifts[:, mid_idx].std()*100:.1f}%)")
+print(f"\n  The normal shift model produces near-symmetric MtM for small")
+print(f"  shifts.  Asymmetry grows with sigma because exp(-dz*t) is convex:")
+print(f"  negative shifts inflate DFs exponentially (unbounded), while")
+print(f"  positive shifts compress them toward zero (bounded below).")
+
+# ==============================================================
+# [15]  PLOT 0 — OIS ZERO CURVE + SAMPLE SHIFTED CURVES
+# ==============================================================
+fig, ax = plt.subplots(figsize=(10, 6))
+
+curve_tenors_yr = np.array([ois_dc.yearFraction(today, calendar.advance(today, ql.Period(t)))
+                            for t in OIS_TENORS])
+curve_zeros_pct = np.array(OIS_ZEROS) * 100
+
+ax.plot(curve_tenors_yr, curve_zeros_pct, "k-o", lw=2.5, ms=6, label="Base OIS curve", zorder=5)
+
+sample_shifts = [-0.02, -0.01, 0.01, 0.02]
+colors_shift = ["#2196F3", "#90CAF9", "#FFAB91", "#F44336"]
+for dz, col in zip(sample_shifts, colors_shift):
+    shifted_pct = (np.array(OIS_ZEROS) + dz) * 100
+    sign = "+" if dz > 0 else ""
+    ax.plot(curve_tenors_yr, shifted_pct, "--", color=col, lw=1.5,
+            label=f"Parallel shift {sign}{dz*100:.0f}%", zorder=3)
+
+ax.set_xlabel("Tenor (years)", fontsize=12)
+ax.set_ylabel("Zero rate (%, continuously compounded)", fontsize=12)
+ax.set_title("ESTR/OIS Zero Curve — Base and Sample Parallel Shifts", fontsize=13,
+             fontweight="bold")
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+fig.savefig("plots/ois_curve.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+print(f"\n  Plot saved to plots/ois_curve.png")
+
+# ==============================================================
+# [16]  FOUR INDIVIDUAL EXPOSURE PLOTS
 # ==============================================================
 def save_exposure_plot(filename, tenor_yrs, mtm, epe, ene, pfe, nfe, title, suptitle):
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -357,7 +413,7 @@ def save_exposure_plot(filename, tenor_yrs, mtm, epe, ene, pfe, nfe, title, supt
     plt.close(fig)
     print(f"  Plot saved to {filename}")
 
-common_sup = f"{N_PATHS} paths | $\\sigma$ = {SIGMA:.3f} | cumulative random walk"
+common_sup = f"{N_PATHS} paths | {N_TENORS} tenors | $\\sigma$ = {SIGMA:.3f} | cumulative random walk"
 
 for label, P, asw, mtm0 in scenario_data:
     epe, ene, pfe, nfe = metrics[label]
