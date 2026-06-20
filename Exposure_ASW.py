@@ -2,6 +2,9 @@
 ===============================================================
   COUNTERPARTY EXPOSURE PROFILES — FOUR SWAP STRUCTURES
   Par-par ASW (3 bond prices) + Fix-for-Fix differential swap
+
+  RATE MODEL:  one-factor Hull-White (1F HW) short-rate model,
+               fitted to the current ESTR/OIS zero curve.
 ===============================================================
 
 STRUCTURES 1-3:  Par-par asset swap on BTP 3.45%, differing by
@@ -15,6 +18,9 @@ STRUCTURES 1-3:  Par-par asset swap on BTP 3.45%, differing by
   Swap MtM = N*(1 - DF_fwd(obs,T)) + (ASW - c)*N*A_rem
   Inception MtM = 100 - P.
 
+  NB: the P = 100 (par) scenario IS the plain fix-for-floating
+  BTP asset swap (MtM_0 = 0).
+
 STRUCTURE 4:  Fix-for-fix differential swap
     Bank RECEIVES: 3.50% fixed
     Bank PAYS:     3.00% fixed
@@ -23,11 +29,17 @@ STRUCTURE 4:  Fix-for-fix differential swap
     Exhibits sawtooth profile: MtM steps down at each semi-annual
     coupon date as the bank receives a net coupon payment.
 
-EXPOSURE SIMULATION:
+EXPOSURE SIMULATION (Hull-White 1F):
   - 100 equally spaced observation dates from today to maturity
-  - Cumulative parallel ESTR shifts (random walk):
-      shifts[:, 0] = 0,  shifts[:, t] = shifts[:, t-1] + N(0, sigma)
-  - Analytical DF shifting: DF_shifted(d) = DF_base(d) * exp(-dz * t_d)
+  - Short rate r(t) simulated forward under the HW process,
+    calibrated to the base OIS curve as initial term structure:
+      a (mean reversion) = 0.03,  sigma = 0.01
+  - At each observation date / path, the path-consistent discount
+    factors P(t,T) are rebuilt from r(t) via the HW analytic affine
+    bond formula:  P(t,T) = A(t,T) * exp(-B(t,T) * r(t))
+  - Swap MtM is the value AT the observation date (remaining
+    cashflows discounted to the observation date only).  The MtM
+    is NOT discounted back to t=0 — this is an exposure study.
   - Same 1500 MC paths reused across all four structures
   - EPE, ENE, PFE (95th), NFE (5th)
 
@@ -57,8 +69,11 @@ OIS_ZEROS  = [0.01931, 0.023711, 0.02448, 0.02475, 0.025132,
 
 N_PATHS  = 1500
 N_TENORS = 100
-SIGMA    = 0.010
 np.random.seed(42)
+
+# Hull-White 1F parameters (fixed)
+HW_A     = 0.03    # mean reversion
+HW_SIGMA = 0.01    # short-rate volatility
 
 # Three bond price scenarios for the par-par ASW
 SCENARIOS = [
@@ -96,6 +111,7 @@ def build_ois_curve(zeros):
     return curve
 
 base_curve = build_ois_curve(OIS_ZEROS)
+ts_handle  = ql.YieldTermStructureHandle(base_curve)
 
 # ==============================================================
 # [4]  BUILD BOND SCHEDULE AND EXTRACT COUPON DATES
@@ -136,7 +152,7 @@ r_s  = (1.0 - df_T) / annuity
 # ==============================================================
 sep = "=" * 68
 print(sep)
-print("  COUNTERPARTY EXPOSURE — FOUR SWAP STRUCTURES")
+print("  COUNTERPARTY EXPOSURE — FOUR SWAP STRUCTURES (Hull-White 1F)")
 print(sep)
 
 print(f"\n[1]  COMMON PARAMETERS")
@@ -144,6 +160,8 @@ print(f"  Bond coupon c:           {COUPON_RATE*100:.2f}%")
 print(f"  OIS par swap rate r_s:   {r_s*100:.4f}%")
 print(f"  Annuity A:               {annuity:.6f}")
 print(f"  DF(0,T):                 {df_T:.6f}")
+print(f"  HW mean reversion a:     {HW_A:.4f}")
+print(f"  HW sigma:                {HW_SIGMA:.4f}")
 
 scenario_data = []
 print(f"\n[2]  DAY-1 MtM CHECK  (swap MtM + bond price = 100)")
@@ -178,7 +196,7 @@ print(f"  First 5: {', '.join(str(d) for d in tenor_dates[:5])}")
 print(f"  Last 5:  {', '.join(str(d) for d in tenor_dates[-5:])}")
 
 # ==============================================================
-# [8]  PRE-COMPUTE BASE DFs AND COUPON PERIOD DATA
+# [8]  PRE-COMPUTE BASE DFs, FORWARD RATES AND COUPON PERIOD DATA
 # ==============================================================
 all_relevant_dates = sorted(set(
     coupon_dates + [BOND_MATURITY] + tenor_dates + period_starts
@@ -198,40 +216,100 @@ for s, e in zip(period_starts, coupon_dates):
 
 mat_serial = BOND_MATURITY.serialNumber()
 
-# ==============================================================
-# [9]  GENERATE CUMULATIVE RANDOM WALK SHIFTS
-#      shifts[:, 0] = 0
-#      shifts[:, t] = shifts[:, t-1] + N(0, sigma)
-#      Same paths reused across all four structures.
-# ==============================================================
-increments = np.random.normal(0.0, SIGMA, size=(N_PATHS, len(tenor_dates)))
-increments[:, 0] = 0.0
-shifts = np.cumsum(increments, axis=1)
+# Instantaneous forward rate f(0,t) from the base curve, per observation date.
+def inst_fwd(tau):
+    if tau <= 0.0:
+        tau = 1e-6
+    return base_curve.forwardRate(tau, tau, ql.Continuous, ql.Annual, True).rate()
 
-print(f"\n[4]  MONTE CARLO SIMULATION")
-print(f"  Paths: {N_PATHS},  Sigma: {SIGMA:.4f} per step,  Tenors: {len(tenor_dates)}")
-print(f"  Shift stats at final tenor: mean={shifts[:,-1].mean():.4f}, "
-      f"std={shifts[:,-1].std():.4f}")
+f0_obs = np.array([inst_fwd(t) for t in tenor_years])
 
 # ==============================================================
-# [10]  PRE-COMPUTE A_rem AND DF_fwd_T FOR ALL PATHS AND TENORS
+# [9]  HULL-WHITE MODEL — analytic affine bond reconstruction
 #
+#      P(t,T) = A(t,T) * exp(-B(t,T) * r(t))
+#        B(t,T) = (1 - exp(-a(T-t))) / a
+#        A(t,T) = P0(T)/P0(t)
+#                 * exp( B(t,T)*f(0,t)
+#                        - (sigma^2/(4a))*(1-exp(-2a t))*B(t,T)^2 )
+#
+#      Reprices the base curve exactly at t=0 (r(0)=f(0,0)).
+# ==============================================================
+hw_model   = ql.HullWhite(ts_handle, HW_A, HW_SIGMA)        # QuantLib HW model
+hw_process = ql.HullWhiteProcess(ts_handle, HW_A, HW_SIGMA) # short-rate process
+
+def hw_discount_bond(tau_t, P0t, f0t, r_t, tau_T, P0T):
+    """Path-consistent forward discount factor P(t,T) given short rate r(t).
+    r_t may be a scalar or a NumPy array (vectorised over paths)."""
+    dtau = tau_T - tau_t
+    B = (1.0 - np.exp(-HW_A * dtau)) / HW_A
+    A = (P0T / P0t) * np.exp(
+        B * f0t - (HW_SIGMA ** 2 / (4.0 * HW_A)) * (1.0 - np.exp(-2.0 * HW_A * tau_t)) * B ** 2
+    )
+    return A * np.exp(-B * r_t)
+
+# Sanity check: HW model discountBond reprices the base curve at t=0.
+chk_T = tenor_years[len(tenor_years) // 2]
+chk_model = hw_model.discountBond(0.0, chk_T, hw_process.x0())
+chk_curve = base_curve.discount(tenor_dates[len(tenor_years) // 2])
+print(f"\n[4]  HULL-WHITE MODEL CHECK")
+print(f"  r(0) = f(0,0):           {hw_process.x0():.6f}")
+print(f"  P(0,{chk_T:.2f}) model:        {chk_model:.6f}")
+print(f"  P(0,{chk_T:.2f}) base curve:   {chk_curve:.6f}")
+print(f"  Reprice error:           {abs(chk_model - chk_curve):.2e}")
+
+# ==============================================================
+# [10]  SIMULATE THE SHORT RATE FORWARD ON THE TENOR GRID
+#
+#       r(0) = process.x0() = f(0,0).
+#       Euler-exact step under the HW process:
+#         E[r_k | r_{k-1}] = r_{k-1} e^{-a dt} + M_k
+#         M_k  = process.expectation(t_{k-1}, 0, dt)
+#         sd_k = process.stdDeviation(t_{k-1}, 0, dt)
+#       Vectorised over all 1500 paths (HW expectation is affine
+#       in r_{k-1}, std is independent of r_{k-1}).
+# ==============================================================
+n_obs   = len(tenor_dates)
+r_paths = np.zeros((N_PATHS, n_obs))
+r_paths[:, 0] = hw_process.x0()
+
+for k in range(1, n_obs):
+    s  = tenor_years[k - 1]
+    dt = tenor_years[k] - tenor_years[k - 1]
+    M  = hw_process.expectation(s, 0.0, dt)     # alpha(s+dt) - alpha(s) e^{-a dt}
+    sd = hw_process.stdDeviation(s, 0.0, dt)    # sigma sqrt((1-e^{-2a dt})/(2a))
+    exp_factor = np.exp(-HW_A * dt)
+    Z = np.random.normal(0.0, 1.0, size=N_PATHS)
+    r_paths[:, k] = M + r_paths[:, k - 1] * exp_factor + sd * Z
+
+print(f"\n[5]  MONTE CARLO SIMULATION (Hull-White 1F)")
+print(f"  Paths: {N_PATHS},  a: {HW_A:.4f},  sigma: {HW_SIGMA:.4f},  Tenors: {n_obs}")
+print(f"  Short rate at final tenor: mean={r_paths[:,-1].mean():.4f}, "
+      f"std={r_paths[:,-1].std():.4f}")
+
+# ==============================================================
+# [11]  PRE-COMPUTE A_rem AND DF_fwd_T FOR ALL PATHS AND TENORS
+#
+#       Path-consistent under each simulated short rate.
 #       These are scenario-independent. The only scenario-specific
 #       quantity is (ASW - c), which is a scalar.
 #
 #       ASW scenarios: MtM = N*(1 - DF_fwd_T) + (ASW - c)*N*A_rem
 #       Fix-fix:       MtM = (c_recv - c_pay) * N * A_rem
 # ==============================================================
-arr_A_rem    = np.zeros((N_PATHS, len(tenor_dates)))
-arr_df_fwd_T = np.ones((N_PATHS, len(tenor_dates)))
+arr_A_rem    = np.zeros((N_PATHS, n_obs))
+arr_df_fwd_T = np.ones((N_PATHS, n_obs))
 
-for t_idx in range(len(tenor_dates)):
+t_mat = date_years[mat_serial]
+P0_mat = base_dfs[mat_serial]
+
+for t_idx in range(n_obs):
     obs_date = tenor_dates[t_idx]
     obs_serial = obs_date.serialNumber()
-    dz = shifts[:, t_idx]
-
-    obs_df_base = base_dfs[obs_serial]
-    obs_t = date_years[obs_serial]
+    obs_t = tenor_years[t_idx]
+    P0_obs = base_dfs[obs_serial]
+    f0t = f0_obs[t_idx]
+    r_t = r_paths[:, t_idx]
 
     rem_coupons = [(s_ser, e_ser, alpha) for s_ser, e_ser, alpha in coupon_data
                    if e_ser > obs_serial]
@@ -240,22 +318,20 @@ for t_idx in range(len(tenor_dates)):
 
     rem_annuity = np.zeros(N_PATHS)
     for s_ser, e_ser, alpha in rem_coupons:
-        df_base_e = base_dfs[e_ser]
+        P0_e = base_dfs[e_ser]
         t_e = date_years[e_ser]
-        df_fwd_e = (df_base_e / obs_df_base) * np.exp(-dz * (t_e - obs_t))
+        df_fwd_e = hw_discount_bond(obs_t, P0_obs, f0t, r_t, t_e, P0_e)
         rem_annuity += alpha * df_fwd_e
 
-    df_base_mat = base_dfs[mat_serial]
-    t_mat = date_years[mat_serial]
-    df_fwd_mat = (df_base_mat / obs_df_base) * np.exp(-dz * (t_mat - obs_t))
+    df_fwd_mat = hw_discount_bond(obs_t, P0_obs, f0t, r_t, t_mat, P0_mat)
 
     arr_A_rem[:, t_idx] = rem_annuity
     arr_df_fwd_T[:, t_idx] = df_fwd_mat
 
-print("  Pre-computation of A_rem and DF_fwd_T complete.")
+print("  Pre-computation of path-consistent A_rem and DF_fwd_T complete.")
 
 # ==============================================================
-# [11]  COMPUTE MtM FOR EACH ASW SCENARIO
+# [12]  COMPUTE MtM FOR EACH ASW SCENARIO
 # ==============================================================
 float_term = N_PCT * (1.0 - arr_df_fwd_T)
 
@@ -267,7 +343,7 @@ for label, P, asw, mtm0 in scenario_data:
 print("  MtM computed for all three ASW scenarios.")
 
 # ==============================================================
-# [12]  FIX-FOR-FIX DIFFERENTIAL SWAP
+# [13]  FIX-FOR-FIX DIFFERENTIAL SWAP
 #
 #       MtM = (c_recv - c_pay) * N * A_rem
 #       Always positive since c_recv > c_pay.
@@ -281,13 +357,13 @@ mtm0_fixfix    = coupon_diff_ff * N_PCT * annuity
 
 mtm_all["Fix-Fix"] = mtm_fixfix
 
-print(f"\n[5]  FIX-FOR-FIX DIFFERENTIAL SWAP")
+print(f"\n[6]  FIX-FOR-FIX DIFFERENTIAL SWAP")
 print(f"  Bank receives:  {C_RECV*100:.2f}% fixed")
 print(f"  Bank pays:      {C_PAY*100:.2f}% fixed")
 print(f"  Inception MtM:  {mtm0_fixfix:.4f}% of notional (always positive)")
 
 # ==============================================================
-# [13]  EXPOSURE METRICS — ALL FOUR STRUCTURES
+# [14]  EXPOSURE METRICS — ALL FOUR STRUCTURES
 # ==============================================================
 def compute_exposure_metrics(mtm):
     epe = np.maximum(mtm, 0.0).mean(axis=0)
@@ -301,89 +377,98 @@ for label, P, asw, mtm0 in scenario_data:
     metrics[label] = compute_exposure_metrics(mtm_all[label])
 metrics["Fix-Fix"] = compute_exposure_metrics(mtm_fixfix)
 
-step_print = max(1, len(tenor_dates) // 10)
+step_print = max(1, n_obs // 10)
 
 for label, P, asw, mtm0 in scenario_data:
     epe, ene, pfe, nfe = metrics[label]
-    print(f"\n[6]  {label.upper()}  (P = {P:.0f}, ASW = {asw*10000:.1f} bps, MtM_0 = {mtm0:+.2f})")
+    print(f"\n[7]  {label.upper()}  (P = {P:.0f}, ASW = {asw*10000:.1f} bps, MtM_0 = {mtm0:+.2f})")
     print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
     print(f"  {'-'*50}")
-    for i in range(0, len(tenor_dates), step_print):
-        det = "  <- det" if i == 0 else ""
+    for i in range(0, n_obs, step_print):
+        det = "  <- t=0" if i == 0 else ""
         print(f"  {tenor_years[i]:>7.2f}Y  {epe[i]:>8.4f}  {ene[i]:>8.4f}  "
               f"{pfe[i]:>10.4f}  {nfe[i]:>10.4f}{det}")
-    if (len(tenor_dates) - 1) % step_print != 0:
-        i = len(tenor_dates) - 1
+    if (n_obs - 1) % step_print != 0:
+        i = n_obs - 1
         print(f"  {tenor_years[i]:>7.2f}Y  {epe[i]:>8.4f}  {ene[i]:>8.4f}  "
               f"{pfe[i]:>10.4f}  {nfe[i]:>10.4f}")
 
 epe_ff, ene_ff, pfe_ff, nfe_ff = metrics["Fix-Fix"]
-print(f"\n[6]  FIX-FOR-FIX  (recv {C_RECV*100:.2f}%, pay {C_PAY*100:.2f}%, MtM_0 = {mtm0_fixfix:+.2f})")
+print(f"\n[7]  FIX-FOR-FIX  (recv {C_RECV*100:.2f}%, pay {C_PAY*100:.2f}%, MtM_0 = {mtm0_fixfix:+.2f})")
 print(f"  {'Tenor':>8}  {'EPE':>8}  {'ENE':>8}  {'PFE 95%':>10}  {'NFE 5%':>10}")
 print(f"  {'-'*50}")
-for i in range(0, len(tenor_dates), step_print):
-    det = "  <- det" if i == 0 else ""
+for i in range(0, n_obs, step_print):
+    det = "  <- t=0" if i == 0 else ""
     print(f"  {tenor_years[i]:>7.2f}Y  {epe_ff[i]:>8.4f}  {ene_ff[i]:>8.4f}  "
           f"{pfe_ff[i]:>10.4f}  {nfe_ff[i]:>10.4f}{det}")
-if (len(tenor_dates) - 1) % step_print != 0:
-    i = len(tenor_dates) - 1
+if (n_obs - 1) % step_print != 0:
+    i = n_obs - 1
     print(f"  {tenor_years[i]:>7.2f}Y  {epe_ff[i]:>8.4f}  {ene_ff[i]:>8.4f}  "
           f"{pfe_ff[i]:>10.4f}  {nfe_ff[i]:>10.4f}")
 print(f"\n  Always positive: bank receives more than it pays.")
 
 # ==============================================================
-# [14]  SYMMETRY DIAGNOSTIC — par ASW scenario
+# [15]  EPE / ENE DIAGNOSTIC — par ASW scenario
 #
-#       With a normal (additive) shift model and moderate sigma,
-#       the MtM formula is approximately linear in the shift dz,
-#       so the distribution is nearly symmetric around inception.
-#       Asymmetry arises from the exp(-dz*t) convexity (Jensen's
-#       inequality): large negative shifts inflate DFs exponentially
-#       while positive shifts compress them toward zero.
-#       With 100 steps and sigma=0.010, the cumulative shift std
-#       at ~5Y is ~0.07 (7%), enough for visible convexity.
+#       Under Hull-White the bond prices P(t,T) are log-affine in
+#       the Gaussian short rate, so the MtM distribution is
+#       skewed (the exp(-B r) reconstruction is convex in r).
 # ==============================================================
 mtm_par = mtm_all["A (par)"]
-mid_idx = len(tenor_dates) // 2
+mid_idx = n_obs // 2
 mtm_mid = mtm_par[:, mid_idx]
 skew_mid = float(np.mean(((mtm_mid - mtm_mid.mean()) / mtm_mid.std()) ** 3))
 epe_mid, ene_mid = metrics["A (par)"][0][mid_idx], metrics["A (par)"][1][mid_idx]
 
-print(f"\n[7]  EPE / ENE SYMMETRY DIAGNOSTIC  (par scenario, t = {tenor_years[mid_idx]:.1f}Y)")
+print(f"\n[8]  EPE / ENE DIAGNOSTIC  (par scenario, t = {tenor_years[mid_idx]:.1f}Y)")
 print(f"  EPE:                {epe_mid:>8.4f}")
 print(f"  |ENE|:              {abs(ene_mid):>8.4f}")
 print(f"  EPE / |ENE|:        {epe_mid / abs(ene_mid):>8.4f}  (1.0 = perfect symmetry)")
 print(f"  MtM skewness:       {skew_mid:>8.4f}  (0 = symmetric)")
-print(f"  Shift std at t:     {shifts[:, mid_idx].std():>8.4f}  ({shifts[:, mid_idx].std()*100:.1f}%)")
-print(f"\n  The normal shift model produces near-symmetric MtM for small")
-print(f"  shifts.  Asymmetry grows with sigma because exp(-dz*t) is convex:")
-print(f"  negative shifts inflate DFs exponentially (unbounded), while")
-print(f"  positive shifts compress them toward zero (bounded below).")
+print(f"  Short rate std:     {r_paths[:, mid_idx].std():>8.4f}  "
+      f"({r_paths[:, mid_idx].std()*100:.2f}%)")
 
 # ==============================================================
-# [15]  PLOT 0 — OIS ZERO CURVE + SAMPLE SHIFTED CURVES
+# [16]  PLOT 0 — OIS ZERO CURVE + SAMPLE SIMULATED HW CURVES
+#
+#       The base zero curve plus the zero curves implied by a
+#       handful of simulated short rates at a 2Y horizon
+#       (reconstructed via the HW affine bond formula).
 # ==============================================================
 fig, ax = plt.subplots(figsize=(10, 6))
 
 curve_tenors_yr = np.array([ois_dc.yearFraction(today, calendar.advance(today, ql.Period(t)))
                             for t in OIS_TENORS])
 curve_zeros_pct = np.array(OIS_ZEROS) * 100
+ax.plot(curve_tenors_yr, curve_zeros_pct, "k-o", lw=2.5, ms=6,
+        label="Base OIS curve (t=0)", zorder=5)
 
-ax.plot(curve_tenors_yr, curve_zeros_pct, "k-o", lw=2.5, ms=6, label="Base OIS curve", zorder=5)
+# Sample simulated zero curves observed at a 2Y horizon.
+horizon_idx = int(np.argmin(np.abs(tenor_years - 2.0)))
+tau_h = tenor_years[horizon_idx]
+P0_h = base_dfs[tenor_dates[horizon_idx].serialNumber()]
+f0_h = f0_obs[horizon_idx]
+fwd_mats = [d for d in tenor_dates if date_years[d.serialNumber()] > tau_h + 0.05]
+fwd_tau = np.array([date_years[d.serialNumber()] for d in fwd_mats])
+fwd_P0  = np.array([base_dfs[d.serialNumber()] for d in fwd_mats])
 
-sample_shifts = [-0.02, -0.01, 0.01, 0.02]
-colors_shift = ["#2196F3", "#90CAF9", "#FFAB91", "#F44336"]
-for dz, col in zip(sample_shifts, colors_shift):
-    shifted_pct = (np.array(OIS_ZEROS) + dz) * 100
-    sign = "+" if dz > 0 else ""
-    ax.plot(curve_tenors_yr, shifted_pct, "--", color=col, lw=1.5,
-            label=f"Parallel shift {sign}{dz*100:.0f}%", zorder=3)
+rng_sample = np.random.RandomState(7)
+sample_paths = rng_sample.choice(N_PATHS, size=5, replace=False)
+sample_colors = ["#2196F3", "#90CAF9", "#FFB74D", "#F44336", "#8E24AA"]
+for sp, col in zip(sample_paths, sample_colors):
+    r_h = r_paths[sp, horizon_idx]
+    zeros_h = []
+    for tT, P0T in zip(fwd_tau, fwd_P0):
+        P_tT = hw_discount_bond(tau_h, P0_h, f0_h, r_h, tT, P0T)
+        zeros_h.append(-np.log(P_tT) / (tT - tau_h))
+    ax.plot(fwd_tau, np.array(zeros_h) * 100, "--", color=col, lw=1.3,
+            label=f"Sim. zero curve @ {tau_h:.1f}Y (path {sp})", zorder=3)
 
 ax.set_xlabel("Tenor (years)", fontsize=12)
 ax.set_ylabel("Zero rate (%, continuously compounded)", fontsize=12)
-ax.set_title("ESTR/OIS Zero Curve — Base and Sample Parallel Shifts", fontsize=13,
-             fontweight="bold")
-ax.legend(fontsize=10)
+ax.set_title("ESTR/OIS Zero Curve — Base and Hull-White Simulated Curves",
+             fontsize=13, fontweight="bold")
+ax.legend(fontsize=9)
 ax.grid(True, alpha=0.3)
 plt.tight_layout()
 fig.savefig("plots/ois_curve.png", dpi=150, bbox_inches="tight")
@@ -391,7 +476,7 @@ plt.close(fig)
 print(f"\n  Plot saved to plots/ois_curve.png")
 
 # ==============================================================
-# [16]  FOUR INDIVIDUAL EXPOSURE PLOTS
+# [17]  FOUR INDIVIDUAL EXPOSURE PLOTS
 # ==============================================================
 def save_exposure_plot(filename, tenor_yrs, mtm, epe, ene, pfe, nfe, title, suptitle):
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -413,15 +498,17 @@ def save_exposure_plot(filename, tenor_yrs, mtm, epe, ene, pfe, nfe, title, supt
     plt.close(fig)
     print(f"  Plot saved to {filename}")
 
-common_sup = f"{N_PATHS} paths | {N_TENORS} tenors | $\\sigma$ = {SIGMA:.3f} | cumulative random walk"
+common_sup = (f"{N_PATHS} paths | {N_TENORS} tenors | "
+              f"Hull-White 1F (a={HW_A:.2f}, $\\sigma$={HW_SIGMA:.2f})")
 
 for label, P, asw, mtm0 in scenario_data:
     epe, ene, pfe, nfe = metrics[label]
     tag = label.split("(")[1].rstrip(")")
     fname = f"plots/exposure_asw_{tag}.png"
+    extra = "  (fix-for-floating BTP asset swap)" if P == 100.0 else ""
     save_exposure_plot(
         fname, tenor_years, mtm_all[label], epe, ene, pfe, nfe,
-        f"P = {P:.0f},  ASW = {asw*10000:.0f} bps,  MtM$_0$ = {mtm0:+.1f}",
+        f"P = {P:.0f},  ASW = {asw*10000:.0f} bps,  MtM$_0$ = {mtm0:+.1f}{extra}",
         f"Par-Par Asset Swap — {label} | {common_sup}",
     )
 
